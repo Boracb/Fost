@@ -7,6 +7,7 @@ import com.toedter.calendar.JDateChooser;
 import db.DatabaseHelper;
 import db.KomitentiDatabaseHelper;
 import db.UserDatabaseHelper;
+import ui.DateCellEditor;
 import excel.ExcelExporter;
 import excel.ExcelImporter;
 import logic.DateUtils;
@@ -274,43 +275,9 @@ public class UI {
      setUpKomitentDropdown();
      setUpPredstavnikDropdown();
 
-     enableKomitentSearchPopup();
-
-        // --- NOVO: Dvoklik popup za komitenta ---
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga
-     // Ažurira odgovarajuće ćelije u modelu tablice
-     // 2 = kolona KomitentOpis
-     // 15 = kolona Trg. predstavnik
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga		
-     // Ažurira odgovarajuće ćelije u modelu tablice
-     // 2 = kolona KomitentOpis
-     // 15 = kolona Trg. predstavnik
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga
-        table.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2) {
-                    int viewRow = table.getSelectedRow();
-                    int viewCol = table.getSelectedColumn();
-                    if (viewRow < 0 || viewCol < 0) return;
-                    int modelCol = table.convertColumnIndexToModel(viewCol);
-                    int modelRow = table.convertRowIndexToModel(viewRow);
-                    if (modelCol == KOMITENT_OPIS_COL) {
-                        String odabraniOpis = KomitentSearchDialog.showDialog(frame);
-                        if (odabraniOpis != null && !odabraniOpis.isEmpty()) {
-                            tableModel.setValueAt(odabraniOpis, modelRow, KOMITENT_OPIS_COL);
-                            String tp = komitentTPMap.getOrDefault(odabraniOpis, "");
-                            tableModel.setValueAt(tp, modelRow, TP_COL);
-                        }
-                    }
-                }
-            }
-        });
-
-        setUpKomitentDropdown(); // u ovoj metodi ne postavljati cellEditor za kolonu 2
+        // --- DOUBLE-CLICK EDITORS AND OPENERS ---
+        enforceDoubleClickEditors();
+        enableDoubleClickOpeners();
 
         // --- LISTENERI I ADMIN POPUP ---
         
@@ -1084,7 +1051,7 @@ public class UI {
     
     
     private void setUpDateColumns() {
-        int[] dateCols = {0, 1, 12, 13};
+        int[] dateCols = {0, 1};
         for (int c : dateCols) {
             int v = table.convertColumnIndexToView(c);
             if (v < 0) continue;
@@ -1092,6 +1059,12 @@ public class UI {
             col.setCellEditor(new CalendarTimeCellEditor());
             col.setCellRenderer(new CalendarTimeCellRenderer());
         }
+        
+        // Set DateCellEditor for start/end columns (model indexes 12 and 13) with "HH:mm" pattern
+        int startView = table.convertColumnIndexToView(12);
+        if (startView >= 0) table.getColumnModel().getColumn(startView).setCellEditor(new DateCellEditor("HH:mm"));
+        int endView = table.convertColumnIndexToView(13);
+        if (endView >= 0) table.getColumnModel().getColumn(endView).setCellEditor(new DateCellEditor("HH:mm"));
     }
 
     /**
@@ -1267,6 +1240,158 @@ public class UI {
     
     private void resetInactivityTimer() {
         if (inactivityTimer != null) inactivityTimer.restart();
+    }
+
+    /**
+     * Enforces double-click for table cell editors by setting clickCountToStart to 2.
+     */
+    private void enforceDoubleClickEditors() {
+        // Set double-click for default editors (String, Integer, Double, Boolean)
+        TableCellEditor defaultEditor = table.getDefaultEditor(String.class);
+        if (defaultEditor instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) defaultEditor).setClickCountToStart(2);
+        }
+        
+        defaultEditor = table.getDefaultEditor(Integer.class);
+        if (defaultEditor instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) defaultEditor).setClickCountToStart(2);
+        }
+        
+        defaultEditor = table.getDefaultEditor(Double.class);
+        if (defaultEditor instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) defaultEditor).setClickCountToStart(2);
+        }
+        
+        defaultEditor = table.getDefaultEditor(Boolean.class);
+        if (defaultEditor instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) defaultEditor).setClickCountToStart(2);
+        }
+        
+        // Set double-click for specific column editors (djelatnik column view index 7, start/end columns 12/13)
+        int djelatnikView = table.convertColumnIndexToView(7);
+        if (djelatnikView >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(djelatnikView).getCellEditor();
+            if (editor instanceof DefaultCellEditor) {
+                ((DefaultCellEditor) editor).setClickCountToStart(2);
+            }
+        }
+        
+        int startView = table.convertColumnIndexToView(12);
+        if (startView >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(startView).getCellEditor();
+            if (editor instanceof DefaultCellEditor) {
+                ((DefaultCellEditor) editor).setClickCountToStart(2);
+            }
+        }
+        
+        int endView = table.convertColumnIndexToView(13);
+        if (endView >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(endView).getCellEditor();
+            if (editor instanceof DefaultCellEditor) {
+                ((DefaultCellEditor) editor).setClickCountToStart(2);
+            }
+        }
+    }
+
+    /**
+     * Enables double-click openers for table cells.
+     */
+    private void enableDoubleClickOpeners() {
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 1) {
+                    // Ignore single-click
+                    return;
+                }
+                
+                if (e.getClickCount() == 2) {
+                    int viewRow = table.getSelectedRow();
+                    int viewCol = table.getSelectedColumn();
+                    if (viewRow < 0 || viewCol < 0) return;
+                    
+                    int modelRow = table.convertRowIndexToModel(viewRow);
+                    int modelCol = table.convertColumnIndexToModel(viewCol);
+                    
+                    System.out.println("Double-click detected: row=" + viewRow + ", col=" + viewCol + ", modelCol=" + modelCol);
+                    
+                    if (modelCol == 2) {
+                        // Open komitent dialog (reuse existing logic from enableKomitentSearchPopup)
+                        JDialog dialog = new JDialog(frame, "Odaberi komitenta", true);
+                        dialog.setSize(400, 300);
+                        dialog.setLocationRelativeTo(frame);
+                        dialog.setLayout(new BorderLayout(5, 5));
+
+                        JTextField searchField = new JTextField();
+                        DefaultListModel<String> listModel = new DefaultListModel<>();
+                        JList<String> list = new JList<>(listModel);
+                        list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+                        java.util.List<String> komitenti = KomitentiDatabaseHelper.loadAllKomitentNames();
+                        komitenti.forEach(listModel::addElement);
+
+                        searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+                            public void insertUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+                            public void removeUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+                            public void changedUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+                            private void filter() {
+                                String txt = searchField.getText().toLowerCase();
+                                listModel.clear();
+                                komitenti.stream()
+                                        .filter(k -> k.toLowerCase().contains(txt))
+                                        .forEach(listModel::addElement);
+                            }
+                        });
+
+                        Runnable selectAction = () -> {
+                            String val = list.getSelectedValue();
+                            if (val != null) {
+                                tableModel.setValueAt(val, modelRow, 2);
+                                String tp = KomitentiDatabaseHelper.loadKomitentPredstavnikMap().getOrDefault(val, "");
+                                if (tp.isBlank()) {
+                                    String unesenTP = JOptionPane.showInputDialog(frame,
+                                        "Unesi trgovačkog predstavnika za: " + val, "");
+                                    if (unesenTP == null) unesenTP = "";
+                                    tp = unesenTP.trim();
+                                    KomitentiDatabaseHelper.insertIfNotExists(val, tp);
+                                }
+                                tableModel.setValueAt(tp, modelRow, 15);
+                                komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+                                dialog.dispose();
+                            }
+                        };
+
+                        list.addMouseListener(new MouseAdapter() {
+                            @Override
+                            public void mouseClicked(MouseEvent e) {
+                                if (e.getClickCount() == 2) selectAction.run();
+                            }
+                        });
+
+                        JButton btnSelect = new JButton("Odaberi");
+                        btnSelect.addActionListener(ev -> selectAction.run());
+
+                        dialog.add(searchField, BorderLayout.NORTH);
+                        dialog.add(new JScrollPane(list), BorderLayout.CENTER);
+                        dialog.add(btnSelect, BorderLayout.SOUTH);
+
+                        dialog.setVisible(true);
+                    } else {
+                        // Call table.editCellAt for other columns
+                        table.editCellAt(viewRow, viewCol);
+                        TableCellEditor editor = table.getCellEditor();
+                        if (editor != null) {
+                            Component editorComponent = table.getEditorComponent();
+                            if (editorComponent instanceof JComboBox) {
+                                ((JComboBox<?>) editorComponent).showPopup();
+                            } else if (editorComponent != null) {
+                                editorComponent.requestFocus();
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /**
