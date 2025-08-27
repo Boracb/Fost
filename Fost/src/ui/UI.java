@@ -459,15 +459,18 @@ public class UI {
     // 13 = endTime
     // Računa trajanje između start i end vremena za jedan red.
     private void recomputeDuration(int row) {
-        String start = (String) tableModel.getValueAt(row, 12);
-        String end   = (String) tableModel.getValueAt(row, 13);
-        if (start == null || end == null || start.isBlank() || end.isBlank()) {
+        Object startObj = tableModel.getValueAt(row, 12);
+        Object endObj   = tableModel.getValueAt(row, 13);
+
+        String start = startObj == null ? "" : startObj.toString().trim();
+        String end   = endObj   == null ? "" : endObj.toString().trim();
+
+        if (start.isBlank() || end.isBlank()) {
             tableModel.setValueAt("", row, 14);
             return;
         }
-      
-    // Pronalazak indeksa kolone "duration"
-        
+
+        // Pronalazak indeksa kolone "duration"
         int columnIndex = -1;
         for (int i = 0; i < columnNames.length; i++) {
             if ("duration".equals(columnNames[i])) {
@@ -475,11 +478,25 @@ public class UI {
                 break;
             }
         }
-         // Ako kolona nije pronađena, izlazimo iz metode
-           String duration = WorkingTimeCalculator.calculateWorkingDuration(start, end);
-           tableModel.setValueAt(duration, row, columnIndex);
-           
-        
+        if (columnIndex == -1) {
+            // ne bi se trebalo dogoditi — ali sigurnosna provjera
+            System.err.println("Greška: kolona 'duration' nije pronađena.");
+            return;
+        }
+
+        // Debug: ispiši što pokušavamo parsirati (možete zamijeniti System.out sa ActionLoggerom)
+        System.out.println("recomputeDuration row=" + row + " start='" + start + "' end='" + end + "'");
+
+        String duration;
+        try {
+            duration = WorkingTimeCalculator.calculateWorkingDuration(start, end);
+        } catch (Exception ex) {
+            // Ako parser baci iznimku, ne propustiti daljnji rad aplikacije
+            ex.printStackTrace();
+            duration = "";
+        }
+
+        tableModel.setValueAt(duration, row, columnIndex);
     }
 
     /**
