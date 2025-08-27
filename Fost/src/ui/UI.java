@@ -17,7 +17,9 @@ import java.awt.*;
 import java.awt.event.*;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -1069,15 +1071,29 @@ public class UI {
     
     
     private void setUpDateColumns() {
-        int[] dateCols = {0, 1, 12, 13};
-        for (int c : dateCols) {
+        // date-only: datumNarudzbe (0), predDatumIsporuke (1)
+        int[] dateOnlyCols = {0, 1};
+        // date+time: startTime (12), endTime (13)
+        int[] dateTimeCols = {12, 13};
+
+        for (int c : dateOnlyCols) {
             int v = table.convertColumnIndexToView(c);
             if (v < 0) continue;
             TableColumn col = table.getColumnModel().getColumn(v);
-            col.setCellEditor(new CalendarTimeCellEditor());
-            col.setCellRenderer(new CalendarTimeCellRenderer());
+            col.setCellEditor(new DateOnlyCellEditor());
+            col.setCellRenderer(new DateOnlyCellRenderer());
+        }
+
+        for (int c : dateTimeCols) {
+            int v = table.convertColumnIndexToView(c);
+            if (v < 0) continue;
+            TableColumn col = table.getColumnModel().getColumn(v);
+            col.setCellEditor(new DateTimeCellEditor());
+            col.setCellRenderer(new DateTimeCellRenderer());
         }
     }
+
+
 
     /**
      * Custom TableCellEditor za datum+vrijeme.
@@ -1117,6 +1133,162 @@ public class UI {
             return DateUtils.formatWithoutSeconds(dt);
         }
     }
+    
+    /* ---------------- Date-only editor/renderer (dd/MM/yyyy) ---------------- */
+
+    private static class DateOnlyCellEditor extends AbstractCellEditor implements TableCellEditor {
+        private final JDateChooser dateChooser;
+        private final JPanel panel;
+        private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+        DateOnlyCellEditor() {
+            dateChooser = new JDateChooser();
+            dateChooser.setDateFormatString("dd/MM/yyyy");
+            panel = new JPanel(new BorderLayout(4, 0));
+            panel.add(dateChooser, BorderLayout.CENTER);
+        }
+
+        @Override
+        public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
+            LocalDate date = null;
+            if (value instanceof String s && !s.isBlank()) {
+                // pokušaj parsiranja dd/MM/yyyy, fallback na DateUtils.parse (koji vraća LocalDateTime)
+                try {
+                    date = LocalDate.parse(s, OUT_FMT);
+                } catch (Exception ex) {
+                    try {
+                        LocalDateTime dt = DateUtils.parse(s);
+                        if (dt != null) date = dt.toLocalDate();
+                    } catch (Exception ex2) {
+                        // ignore -> set current date
+                    }
+                }
+            }
+            if (date == null) date = LocalDate.now();
+            Date dd = Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
+            dateChooser.setDate(dd);
+            return panel;
+        }
+
+        @Override
+        public Object getCellEditorValue() {
+            Date d = dateChooser.getDate();
+            if (d == null) return "";
+            LocalDate ld = d.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            return ld.format(OUT_FMT); // dd/MM/yyyy
+        }
+    }
+    
+	private static class DateOnlyCellRenderer extends DefaultTableCellRenderer {
+		private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+		@Override
+		public Component getTableCellRendererComponent(JTable tbl, Object value, boolean sel, boolean foc, int row,
+				int column) {
+			String text = "";
+			if (value instanceof String && !((String) value).isEmpty()) {
+				// pokušaj parsiranja dd/MM/yyyy, fallback na DateUtils.parse (koji vraća
+				// LocalDateTime)
+				LocalDate date = null;
+				try {
+					date = LocalDate.parse((String) value, OUT_FMT);
+				} catch (Exception ex) {
+					try {
+						LocalDateTime dt = DateUtils.parse((String) value);
+						if (dt != null)
+							date = dt.toLocalDate();
+					} catch (Exception ex2) {
+						// ignore -> leave text empty
+					}
+				}
+				text = (date != null) ? date.format(OUT_FMT) : (String) value;
+			}
+			Component comp = super.getTableCellRendererComponent(tbl, text, sel, foc, row, column);
+			comp.setFont(new Font("Segoe UI", Font.PLAIN, 13));
+			return comp;
+		}
+	}
+	
+	
+	/* ---------------- Date+Time editor/renderer (dd/MM/yyyy HH:mm) ---------------- */
+
+	private static class DateTimeCellEditor extends AbstractCellEditor implements TableCellEditor {
+	    private final JDateChooser dateChooser;
+	    private final JSpinner timeSpinner;
+	    private final JPanel panel;
+	    private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
+
+	    DateTimeCellEditor() {
+	        dateChooser = new JDateChooser();
+	        dateChooser.setDateFormatString("dd/MM/yyyy");
+	        SpinnerDateModel model = new SpinnerDateModel();
+	        timeSpinner = new JSpinner(model);
+	        timeSpinner.setEditor(new JSpinner.DateEditor(timeSpinner, "HH:mm"));
+	        panel = new JPanel(new BorderLayout(4, 0));
+	        panel.add(dateChooser, BorderLayout.CENTER);
+	        panel.add(timeSpinner, BorderLayout.EAST);
+	    }
+
+	    @Override
+	    public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
+	        LocalDateTime dt = null;
+	        if (value instanceof String s && !s.isBlank()) {
+	            // pokušaj parsiranja dd/MM/yyyy HH:mm, fallback na DateUtils.parse()
+	            try {
+	                dt = LocalDateTime.parse(s, OUT_FMT);
+	            } catch (Exception ex) {
+	                try {
+	                    dt = DateUtils.parse(s);
+	                } catch (Exception ex2) {
+	                    // ignore
+	                }
+	            }
+	        }
+	        if (dt == null) dt = LocalDateTime.now();
+	        Date date = Date.from(dt.atZone(ZoneId.systemDefault()).toInstant());
+	        dateChooser.setDate(date);
+	        timeSpinner.setValue(date);
+	        return panel;
+	    }
+
+	    @Override
+	    public Object getCellEditorValue() {
+	        Date d = dateChooser.getDate();
+	        Date t = (Date) timeSpinner.getValue();
+	        if (d == null || t == null) return "";
+	        LocalDate datePart = d.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+	        LocalTime timePart = t.toInstant().atZone(ZoneId.systemDefault()).toLocalTime().withSecond(0).withNano(0);
+	        LocalDateTime dt = LocalDateTime.of(datePart, LocalTime.of(timePart.getHour(), timePart.getMinute()));
+	        return dt.format(OUT_FMT); // dd/MM/yyyy HH:mm
+	    }
+	}
+
+	
+	private static class DateTimeCellRenderer extends DefaultTableCellRenderer {
+	    private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
+
+	    @Override
+	    public Component getTableCellRendererComponent(JTable tbl, Object value, boolean sel, boolean foc, int row, int column) {
+	        String text = "";
+	        if (value instanceof String s && !s.isBlank()) {
+	            try {
+	                LocalDateTime dt = LocalDateTime.parse(s, OUT_FMT);
+	                text = dt.format(OUT_FMT);
+	            } catch (Exception ex) {
+	                try {
+	                    LocalDateTime dt = DateUtils.parse(s);
+	                    if (dt != null) text = dt.format(OUT_FMT);
+	                    else text = s;
+	                } catch (Exception ex2) {
+	                    text = s;
+	                }
+	            }
+	        }
+	        Component comp = super.getTableCellRendererComponent(tbl, text, sel, foc, row, column);
+	        comp.setFont(new Font("Segoe UI", Font.PLAIN, 13));
+	        return comp;
+	    }
+	}
 
     /**
      * Custom renderer za prikaz datuma+vremena.
