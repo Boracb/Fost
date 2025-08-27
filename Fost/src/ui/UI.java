@@ -1050,22 +1050,25 @@ public class UI {
      */
     
     
-    private void setUpDateColumns() {
-        int[] dateCols = {0, 1};
-        for (int c : dateCols) {
-            int v = table.convertColumnIndexToView(c);
-            if (v < 0) continue;
-            TableColumn col = table.getColumnModel().getColumn(v);
-            col.setCellEditor(new CalendarTimeCellEditor());
-            col.setCellRenderer(new CalendarTimeCellRenderer());
-        }
-        
-        // Set DateCellEditor for start/end columns (model indexes 12 and 13) with "HH:mm" pattern
-        int startView = table.convertColumnIndexToView(12);
-        if (startView >= 0) table.getColumnModel().getColumn(startView).setCellEditor(new DateCellEditor("HH:mm"));
-        int endView = table.convertColumnIndexToView(13);
-        if (endView >= 0) table.getColumnModel().getColumn(endView).setCellEditor(new DateCellEditor("HH:mm"));
-    }
+
+ // src/ui/UI.java
+ private void setUpDateColumns() {
+     int[] dateCols = {0, 1};
+     for (int c : dateCols) {
+         int v = table.convertColumnIndexToView(c);
+         if (v < 0) continue;
+         TableColumn col = table.getColumnModel().getColumn(v);
+         col.setCellEditor(new CalendarTimeCellEditor());
+         col.setCellRenderer(new CalendarTimeCellRenderer());
+     }
+
+     // Set DateCellEditor for start/end columns (model indexes 12 and 13) with "dd/MM/yyyy" pattern
+     int startView = table.convertColumnIndexToView(12);
+     if (startView >= 0) table.getColumnModel().getColumn(startView).setCellEditor(new DateCellEditor("dd/MM/yyyy HH:mm"));
+     int endView = table.convertColumnIndexToView(13);
+     if (endView >= 0) table.getColumnModel().getColumn(endView).setCellEditor(new DateCellEditor("dd/MM/yyyy HH:mm"));
+ }
+
 
     /**
      * Custom TableCellEditor za datum+vrijeme.
