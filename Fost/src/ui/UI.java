@@ -4,6 +4,7 @@ import javax.swing.*;
 import javax.swing.event.*;
 import javax.swing.table.*;
 import com.toedter.calendar.JDateChooser;
+import ui.DateCellEditor;
 import db.DatabaseHelper;
 import db.KomitentiDatabaseHelper;
 import db.UserDatabaseHelper;
@@ -276,46 +277,14 @@ public class UI {
 
      enableKomitentSearchPopup();
 
-        // --- NOVO: Dvoklik popup za komitenta ---
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga
-     // Ažurira odgovarajuće ćelije u modelu tablice
-     // 2 = kolona KomitentOpis
-     // 15 = kolona Trg. predstavnik
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga		
-     // Ažurira odgovarajuće ćelije u modelu tablice
-     // 2 = kolona KomitentOpis
-     // 15 = kolona Trg. predstavnik
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga
-        table.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2) {
-                    int viewRow = table.getSelectedRow();
-                    int viewCol = table.getSelectedColumn();
-                    if (viewRow < 0 || viewCol < 0) return;
-                    int modelCol = table.convertColumnIndexToModel(viewCol);
-                    int modelRow = table.convertRowIndexToModel(viewRow);
-                    if (modelCol == KOMITENT_OPIS_COL) {
-                        String odabraniOpis = KomitentSearchDialog.showDialog(frame);
-                        if (odabraniOpis != null && !odabraniOpis.isEmpty()) {
-                            tableModel.setValueAt(odabraniOpis, modelRow, KOMITENT_OPIS_COL);
-                            String tp = komitentTPMap.getOrDefault(odabraniOpis, "");
-                            tableModel.setValueAt(tp, modelRow, TP_COL);
-                        }
-                    }
-                }
-            }
-        });
-
-        setUpKomitentDropdown(); // u ovoj metodi ne postavljati cellEditor za kolonu 2
-
         // --- LISTENERI I ADMIN POPUP ---
         
         setUpListeners();
         setUpAdminUnlockPopup();
+        
+        // --- ENFORCE DOUBLE-CLICK EDITORS AND CENTRALIZED DOUBLE-CLICK HANDLING ---
+        enforceDoubleClickEditors();
+        enableDoubleClickOpeners();
 
         // --- SAKRIVANJE KOLONA ---
         hideColumns(8, 9, 10);
@@ -991,21 +960,80 @@ public class UI {
         col.setCellEditor(new DefaultCellEditor(combo));
     }
     
+    /**
+     * Enforces double-click requirement on default table cell editors.
+     * Sets clickCountToStart(2) on default editors for String, Integer, Double, Boolean
+     * and on any column-specific DefaultCellEditor instances.
+     */
+    private void enforceDoubleClickEditors() {
+        // Set double-click requirement on default table editors
+        if (table.getDefaultEditor(String.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(String.class)).setClickCountToStart(2);
+        }
+        if (table.getDefaultEditor(Integer.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(Integer.class)).setClickCountToStart(2);
+        }
+        if (table.getDefaultEditor(Double.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(Double.class)).setClickCountToStart(2);
+        }
+        if (table.getDefaultEditor(Boolean.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(Boolean.class)).setClickCountToStart(2);
+        }
+        
+        // Set double-click requirement on specific column editors
+        // Check djelatnik column (model index 7)
+        int djelatnikViewCol = table.convertColumnIndexToView(7);
+        if (djelatnikViewCol >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(djelatnikViewCol).getCellEditor();
+            if (editor instanceof DefaultCellEditor) {
+                ((DefaultCellEditor) editor).setClickCountToStart(2);
+            }
+        }
+        
+        // Check startTime column (model index 12)
+        int startTimeViewCol = table.convertColumnIndexToView(12);
+        if (startTimeViewCol >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(startTimeViewCol).getCellEditor();
+            if (editor instanceof DefaultCellEditor) {
+                ((DefaultCellEditor) editor).setClickCountToStart(2);
+            }
+        }
+        
+        // Check endTime column (model index 13)
+        int endTimeViewCol = table.convertColumnIndexToView(13);
+        if (endTimeViewCol >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(endTimeViewCol).getCellEditor();
+            if (editor instanceof DefaultCellEditor) {
+                ((DefaultCellEditor) editor).setClickCountToStart(2);
+            }
+        }
+    }
     
-    private void enableKomitentSearchPopup() {
-        int komitentColView = table.convertColumnIndexToView(2);
-        if (komitentColView < 0) return;
-
-        table.getColumnModel().getColumn(komitentColView).setCellEditor(null);
-
+    /**
+     * Enables double-click handling for all table cells.
+     * Replaces single-click komitent listener with unified double-click handler.
+     * On double-click: opens komitent dialog for column 2, or starts cell editing for other editable cells.
+     */
+    private void enableDoubleClickOpeners() {
         table.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2 && table.getSelectedColumn() == komitentColView) {
-                    int viewRow = table.getSelectedRow();
-                    if (viewRow < 0) return;
-                    int modelRow = table.convertRowIndexToModel(viewRow);
-
+                // Only handle double-clicks, ignore single clicks
+                if (e.getClickCount() != 2) return;
+                
+                int viewRow = table.rowAtPoint(e.getPoint());
+                int viewCol = table.columnAtPoint(e.getPoint());
+                if (viewRow < 0 || viewCol < 0) return;
+                
+                int modelRow = table.convertRowIndexToModel(viewRow);
+                int modelCol = table.convertColumnIndexToModel(viewCol);
+                
+                // Debug output
+                System.out.printf("[DEBUG enableDoubleClickOpeners] viewRow=%d, viewCol=%d, modelRow=%d, modelCol=%d%n", 
+                    viewRow, viewCol, modelRow, modelCol);
+                
+                // Handle komitent column (model index 2)
+                if (modelCol == 2) {
                     JDialog dialog = new JDialog(frame, "Odaberi komitenta", true);
                     dialog.setSize(400, 300);
                     dialog.setLocationRelativeTo(frame);
@@ -1065,9 +1093,45 @@ public class UI {
                     dialog.add(btnSelect, BorderLayout.SOUTH);
 
                     dialog.setVisible(true);
+                } else {
+                    // For other columns, check if cell is editable and start editing
+                    if (table.isCellEditable(viewRow, viewCol)) {
+                        if (table.editCellAt(viewRow, viewCol)) {
+                            Component editor = table.getEditorComponent();
+                            if (editor != null) {
+                                editor.requestFocus();
+                                
+                                // Special handling for JComboBox editors
+                                if (editor instanceof JComboBox) {
+                                    ((JComboBox<?>) editor).showPopup();
+                                } else {
+                                    // Check if it's a DefaultCellEditor with JComboBox
+                                    TableCellEditor cellEditor = table.getCellEditor();
+                                    if (cellEditor instanceof DefaultCellEditor) {
+                                        Component editorComponent = ((DefaultCellEditor) cellEditor).getComponent();
+                                        if (editorComponent instanceof JComboBox) {
+                                            ((JComboBox<?>) editorComponent).showPopup();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
+    }
+    
+    
+    private void enableKomitentSearchPopup() {
+        // This method is now neutralized - double-click handling moved to enableDoubleClickOpeners()
+        // Remove any single-click listeners and ensure no cell editor is set for komitent column
+        int komitentColView = table.convertColumnIndexToView(2);
+        if (komitentColView < 0) return;
+
+        table.getColumnModel().getColumn(komitentColView).setCellEditor(null);
+        // Note: The original double-click MouseListener has been removed
+        // All double-click handling is now centralized in enableDoubleClickOpeners()
     }
 
 
@@ -1084,12 +1148,23 @@ public class UI {
     
     
     private void setUpDateColumns() {
-        int[] dateCols = {0, 1, 12, 13};
-        for (int c : dateCols) {
+        // Set up date+time editor for date columns (0, 1)
+        int[] dateTimeCols = {0, 1};
+        for (int c : dateTimeCols) {
             int v = table.convertColumnIndexToView(c);
             if (v < 0) continue;
             TableColumn col = table.getColumnModel().getColumn(v);
             col.setCellEditor(new CalendarTimeCellEditor());
+            col.setCellRenderer(new CalendarTimeCellRenderer());
+        }
+        
+        // Set up time-only editor for startTime (12) and endTime (13) columns
+        int[] timeCols = {12, 13};
+        for (int c : timeCols) {
+            int v = table.convertColumnIndexToView(c);
+            if (v < 0) continue;
+            TableColumn col = table.getColumnModel().getColumn(v);
+            col.setCellEditor(new DateCellEditor("HH:mm"));
             col.setCellRenderer(new CalendarTimeCellRenderer());
         }
     }
