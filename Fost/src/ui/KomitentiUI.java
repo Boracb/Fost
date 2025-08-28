@@ -7,21 +7,19 @@ import model.KomitentInfo;
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.event.TableModelEvent;
 import javax.swing.table.*;
 import java.awt.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.util.*;
 import java.util.List;
 import java.util.regex.Pattern;
 
 /**
  * KomitentiUI - verzija s importFromNarudzbeTable metodom i robusnijim combo editorom.
- *
- * Poboljšanja:
- * - combo.setLightWeightPopupEnabled(false) radi stabilnijeg popup ponašanja
- * - Sigurno prikazivanje popupa kod editora (invokeLater + isShowing check + try/catch)
- * - Ako nema predstavnika u bazi, u combo se dodaje placeholder "(nema predstavnika)"
- * - refreshPredstavniciCombo skuplja predstavnike iz više izvora bez dupliciranja (case-insensitive)
- * - importFromNarudzbeTable javni API za uvoz komitenata iz modela narudžbi
+ * Promjene: odmah persisting nakon editiranja / dodavanja / dodjele TP,
+ * automatsko commitanje editora prije zatvaranja i update listener na modelu.
  */
 public class KomitentiUI extends JFrame {
 
@@ -43,6 +41,16 @@ public class KomitentiUI extends JFrame {
         initSearchPanel();
         initButtonsPanel();
 
+        // Ensure editing is committed on close to avoid lost edits
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                stopEditingIfNeeded();
+                // optional: do not force a full replace save; we persist per-row already
+                System.out.println("KomitentiUI: prozor zatvaranje - editor commitiran (ako je postojao)");
+            }
+        });
+
         pack();
         setLocationRelativeTo(null);
         printBottomButtonsInfo();
@@ -52,7 +60,7 @@ public class KomitentiUI extends JFrame {
 
     private void initTable() {
         tableModel = new DefaultTableModel(new Object[]{"Komitent", "Trg. predstavnik"}, 0) {
-            @Override public boolean isCellEditable(int row, int column) { return column == 1; }
+            @Override public boolean isCellEditable(int row, int column) { return column == 1 || column == 0; }
         };
         table = new JTable(tableModel);
         table.setFillsViewportHeight(true);
@@ -70,20 +78,36 @@ public class KomitentiUI extends JFrame {
         sorter = new TableRowSorter<>(tableModel);
         table.setRowSorter(sorter);
 
+        // Listen for model updates and immediately persist changed rows (single-row upsert)
+        tableModel.addTableModelListener(e -> {
+            if (e.getType() != TableModelEvent.UPDATE) return;
+            int modelRow = e.getFirstRow();
+            int col = e.getColumn();
+            if (modelRow < 0) return;
+            // fetch values safely
+            Object komObj = tableModel.getValueAt(modelRow, 0);
+            Object tpObj  = tableModel.getValueAt(modelRow, 1);
+            String kom = komObj == null ? "" : komObj.toString().trim();
+            String tp  = tpObj  == null ? "" : tpObj.toString().trim();
+            if (kom.isBlank()) {
+                // do not persist empty komitent
+                return;
+            }
+            // Persist single row change immediately (insert or update)
+            boolean ok = KomitentiDatabaseHelper.insertIfNotExists(kom, tp);
+            System.out.println("KomitentiUI: model update row=" + modelRow + " col=" + col + " -> persist (" + kom + " / " + tp + ") = " + ok);
+            // don't call loadData() here (would re-trigger events). UI will refresh on demand.
+        });
+
         add(new JScrollPane(table), BorderLayout.CENTER);
     }
 
-    /**
-     * Safe combo editor which tries to show popup only when the editor component is actually showing.
-     * Uses invokeLater and guards against IllegalComponentStateException.
-     */
     private static class SafeComboEditor extends DefaultCellEditor {
         private final JComboBox<String> comboTemplate;
 
         public SafeComboEditor(JComboBox<String> template) {
             super(new JComboBox<>());
             this.comboTemplate = template;
-            // keep the editor's combo model in sync initially
             JComboBox<?> ed = (JComboBox<?>) getComponent();
             ed.setEditable(true);
             ed.setLightWeightPopupEnabled(false);
@@ -93,84 +117,47 @@ public class KomitentiUI extends JFrame {
         @Override
         public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
             JComboBox<String> ed = (JComboBox<String>) getComponent();
-
-            // copy items from template safely
             DefaultComboBoxModel<String> cm = new DefaultComboBoxModel<>();
-            for (int i = 0; i < comboTemplate.getItemCount(); i++) {
-                cm.addElement(comboTemplate.getItemAt(i));
-            }
+            for (int i = 0; i < comboTemplate.getItemCount(); i++) cm.addElement(comboTemplate.getItemAt(i));
             ed.setModel(cm);
-
-            // set value
-            if (value != null) ed.setSelectedItem(value.toString());
-            else ed.setSelectedItem("");
-
-            // request focus and try to show popup safely
+            ed.setSelectedItem(value == null ? "" : value.toString());
+            // Try to show popup safely on EDT after component becomes visible
             SwingUtilities.invokeLater(() -> {
                 try {
                     ed.requestFocusInWindow();
-                    if (ed.isShowing()) {
-                        // show popup only if visible on screen
-                        ed.showPopup();
-                    } else {
-                        // Another small delay to allow rendering, guard with try/catch
-                        SwingUtilities.invokeLater(() -> {
-                            try {
-                                if (ed.isShowing()) ed.showPopup();
-                            } catch (IllegalComponentStateException ex) {
-                                // ignore: component not shown yet
-                                System.out.println("SafeComboEditor: showPopup aborted: " + ex.getMessage());
-                            } catch (Exception ignored) {}
-                        });
-                    }
-                } catch (IllegalComponentStateException ex) {
-                    System.out.println("SafeComboEditor (outer) showPopup aborted: " + ex.getMessage());
+                    if (ed.isShowing()) ed.showPopup();
+                    else SwingUtilities.invokeLater(() -> { try { if (ed.isShowing()) ed.showPopup(); } catch (Exception ignored) {} });
                 } catch (Exception ignored) {}
             });
-
             return ed;
         }
 
         @Override
         public Object getCellEditorValue() {
-            return ((JComboBox<?>) getComponent()).getSelectedItem();
+            Object val = ((JComboBox<?>) getComponent()).getSelectedItem();
+            return val == null ? "" : val;
         }
     }
 
-    /**
-     * Popuni combo template s predstavnicima iz PredstavniciDatabaseHelper i KomitentiDatabaseHelper.
-     * Ako nema rezultata, dodaj placeholder "(nema predstavnika)".
-     */
     private void refreshPredstavniciCombo(JComboBox<String> combo) {
-        // Collect unique names case-insensitively
         TreeSet<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         combo.removeAllItems();
-        set.add(""); // keep empty first
-
+        set.add("");
         try {
             List<String> p1 = PredstavniciDatabaseHelper.loadAllPredstavnici();
             if (p1 != null) for (String s : p1) if (s != null && !s.isBlank()) set.add(s.trim());
-        } catch (Throwable t) {
-            System.out.println("refreshPredstavniciCombo: " + t.getMessage());
-        }
+        } catch (Throwable t) { System.out.println("refreshPredstavniciCombo: " + t.getMessage()); }
         try {
             List<String> p2 = KomitentiDatabaseHelper.loadAllPredstavnici();
             if (p2 != null) for (String s : p2) if (s != null && !s.isBlank()) set.add(s.trim());
-        } catch (Throwable t) {
-            System.out.println("refreshPredstavniciCombo(komitenti): " + t.getMessage());
-        }
+        } catch (Throwable t) { System.out.println("refreshPredstavniciCombo(komitenti): " + t.getMessage()); }
 
-        // If only empty is present, add placeholder
         if (set.size() <= 1) {
             combo.addItem("");
             combo.addItem("(nema predstavnika)");
             return;
         }
-
-        // otherwise populate combo preserving ordering
-        for (String s : set) {
-            combo.addItem(s);
-        }
+        for (String s : set) combo.addItem(s);
     }
 
     private void initSearchPanel() {
@@ -205,7 +192,7 @@ public class KomitentiUI extends JFrame {
         JButton btnShowAll = new JButton("Prikaži sve");
         JButton btnSearchDialog = new JButton("Traži komitenta (dialog)");
         JButton btnAssignEmpty = new JButton("Dodijeli TP praznima");
-        JButton btnImportNarudzbe = new JButton("Uvezi iz narudžbi"); // new debug import button
+        JButton btnImportNarudzbe = new JButton("Uvezi iz narudžbi");
         JButton btnTestAdd = new JButton("Test dodaj");
         JButton btnCheckDB = new JButton("Provjeri DB");
 
@@ -228,7 +215,10 @@ public class KomitentiUI extends JFrame {
         btnEdit.addActionListener(e -> editSelected());
         btnAssign.addActionListener(e -> assignPredstavnik());
         btnDelete.addActionListener(e -> deleteSelected());
-        btnSave.addActionListener(e -> saveData());
+        btnSave.addActionListener(e -> {
+            stopEditingIfNeeded();
+            saveData();
+        });
         btnShowEmpty.addActionListener(e -> showKomitentiWithoutPredstavnik());
         btnShowAll.addActionListener(e -> sorter.setRowFilter(null));
         btnSearchDialog.addActionListener(e -> {
@@ -240,6 +230,8 @@ public class KomitentiUI extends JFrame {
                 tableModel.setValueAt(odabrani, modelRow, 0);
                 var map = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
                 if (map != null) tableModel.setValueAt(map.getOrDefault(odabrani, ""), modelRow, 1);
+                // persist immediately
+                KomitentiDatabaseHelper.insertIfNotExists(odabrani, safeString(tableModel.getValueAt(modelRow,1)));
             }
         });
 
@@ -249,24 +241,18 @@ public class KomitentiUI extends JFrame {
             loadData();
             // refresh cell editor model after possible DB changes
             TableColumn tpCol = table.getColumnModel().getColumn(1);
-            if (tpCol.getCellEditor() instanceof SafeComboEditor) {
-                // recreate template and set new editor
-                JComboBox<String> template = new JComboBox<>();
-                template.setEditable(true);
-                template.setLightWeightPopupEnabled(false);
-                refreshPredstavniciCombo(template);
-                tpCol.setCellEditor(new SafeComboEditor(template));
-            }
+            JComboBox<String> template = new JComboBox<>();
+            template.setEditable(true);
+            template.setLightWeightPopupEnabled(false);
+            refreshPredstavniciCombo(template);
+            tpCol.setCellEditor(new SafeComboEditor(template));
         });
 
-        // Open a small input dialog to ask for column index of komitentOpis in orders model.
         btnImportNarudzbe.addActionListener(e -> {
             String input = JOptionPane.showInputDialog(this, "Unesi column index u orders model za komitentOpis (0-based):", "0");
             if (input == null) return;
             try {
                 int col = Integer.parseInt(input.trim());
-                // In practice, you should call importFromNarudzbeTable from the class that has ordersModel.
-                // Here we just show placeholder usage: ask user to paste values.
                 String pasted = JOptionPane.showInputDialog(this, "Zalijepi sve komitentOpis vrijednosti (jedan po retku) ili pritisni Cancel:");
                 if (pasted == null) return;
                 String[] lines = pasted.split("\\r?\\n");
@@ -278,12 +264,13 @@ public class KomitentiUI extends JFrame {
             }
         });
 
-        // DEBUG: programatski dodaj jedinstven testni komitent i spremi u DB
         btnTestAdd.addActionListener(e -> {
             String testName = "TEST_ADD_" + System.currentTimeMillis();
             System.out.println("KomitentiUI: Test dodaj -> " + testName);
             tableModel.addRow(new Object[]{testName, ""});
-            saveData();
+            // persist immediately single row
+            KomitentiDatabaseHelper.insertIfNotExists(testName, "");
+            loadData();
             List<Object[]> rows = KomitentiDatabaseHelper.loadAllRows();
             boolean found = false;
             if (rows != null) {
@@ -327,6 +314,7 @@ public class KomitentiUI extends JFrame {
     }
 
     private void loadData() {
+        stopEditingIfNeeded();
         tableModel.setRowCount(0);
         List<Object[]> rows = KomitentiDatabaseHelper.loadAllRows();
         if (rows != null) {
@@ -339,26 +327,16 @@ public class KomitentiUI extends JFrame {
         System.out.println("KomitentiUI: loadData - učitano " + tableModel.getRowCount() + " redova.");
     }
 
-    /**
-     * PUBLIC API: import missing komitenti iz tablice narudzbi.
-     * ordersModel - DefaultTableModel iz NarudzbeUI
-     * ordersColumnIndex - index stupca koji sadrži komitentOpis
-     *
-     * Dodaje svaki jedinstveni komitentOpis koji nije prisutan (case-insensitive)
-     * u lokalni tableModel i poziva saveData() ako je bilo novih.
-     */
     public void importFromNarudzbeTable(DefaultTableModel ordersModel, int ordersColumnIndex) {
         if (ordersModel == null) {
             JOptionPane.showMessageDialog(this, "ordersModel je null");
             return;
         }
         Set<String> found = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        // postojeći nazivi u trenutnom modelu (case-insensitive)
         for (int r = 0; r < tableModel.getRowCount(); r++) {
             String v = safeString(tableModel.getValueAt(r, 0)).trim();
             if (!v.isBlank()) found.add(v);
         }
-        // također učitaj iz baze (ako ima još kojih)
         Map<String, String> fromDb = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
         if (fromDb != null) found.addAll(fromDb.keySet());
 
@@ -370,33 +348,28 @@ public class KomitentiUI extends JFrame {
             if (o == null) continue;
             String naziv = o.toString().trim();
             if (naziv.isEmpty()) continue;
-            if (!found.contains(naziv) && !toAdd.contains(naziv)) {
-                toAdd.add(naziv);
-            }
+            if (!found.contains(naziv) && !toAdd.contains(naziv)) toAdd.add(naziv);
         }
         if (!toAdd.isEmpty()) {
+            List<KomitentInfo> batch = new ArrayList<>();
             for (String k : toAdd) {
                 tableModel.addRow(new Object[]{k, ""});
+                // accumulate for batch persist
+                batch.add(new KomitentInfo(k, ""));
                 added++;
             }
+            // persist immediately in batch
+            KomitentiDatabaseHelper.upsertList(batch);
             System.out.println("KomitentiUI: importFromNarudzbeTable - dodano novih komitenata = " + added);
-            // spremi odmah
-            saveData();
-            // refresh editor combo after DB changed
-            TableColumn tpCol = table.getColumnModel().getColumn(1);
-            JComboBox<String> template = new JComboBox<>();
-            template.setEditable(true);
-            template.setLightWeightPopupEnabled(false);
-            refreshPredstavniciCombo(template);
-            tpCol.setCellEditor(new SafeComboEditor(template));
+            loadData();
         } else {
             System.out.println("KomitentiUI: importFromNarudzbeTable - nema novih komitenata za dodati");
             JOptionPane.showMessageDialog(this, "Nema novih komitenata za dodati.");
         }
     }
 
-    // public metoda dostupna iz dijaloga
     public void saveData() {
+        stopEditingIfNeeded();
         int rc = tableModel.getRowCount();
         List<KomitentInfo> lista = new ArrayList<>();
         for (int i = 0; i < rc; i++) {
@@ -405,21 +378,19 @@ public class KomitentiUI extends JFrame {
             if (kom.isBlank()) continue;
             lista.add(new KomitentInfo(kom.trim(), tp.trim()));
         }
-        System.out.println("KomitentiUI: saveData - spremam " + lista.size() + " zapisa u DB (poziv KomitentiDatabaseHelper.saveToDatabase)");
-        KomitentiDatabaseHelper.saveToDatabase(lista);
-
+        System.out.println("KomitentiUI: saveData - upserting " + lista.size() + " zapisa u DB (poziv KomitentiDatabaseHelper.upsertList)");
+        KomitentiDatabaseHelper.upsertList(lista);
         List<Object[]> rows = KomitentiDatabaseHelper.loadAllRows();
         int countAfterSave = rows == null ? 0 : rows.size();
-        System.out.println("KomitentiUI: saveData - nakon save loadAllRows size = " + countAfterSave);
-
+        System.out.println("KomitentiUI: saveData - nakon upsert loadAllRows size = " + countAfterSave);
         loadData();
         JOptionPane.showMessageDialog(this, "Promjene spremljene. DB rows: " + countAfterSave);
     }
 
-    // public metoda dostupna iz dijaloga
     public void applyAssignments(Map<String, String> assignments) {
         if (assignments == null || assignments.isEmpty()) return;
         System.out.println("KomitentiUI: applyAssignments - primljeno " + assignments.size() + " dodjela");
+        List<KomitentInfo> toUpsert = new ArrayList<>();
         for (Map.Entry<String, String> en : assignments.entrySet()) {
             String kom = en.getKey();
             String tp = en.getValue();
@@ -435,7 +406,11 @@ public class KomitentiUI extends JFrame {
             if (!applied) {
                 tableModel.addRow(new Object[]{kom, tp});
             }
+            toUpsert.add(new KomitentInfo(kom.trim(), tp == null ? "" : tp.trim()));
         }
+        // persist batch
+        KomitentiDatabaseHelper.upsertList(toUpsert);
+        loadData();
     }
 
     private String safeString(Object o) { return o == null ? "" : o.toString(); }
@@ -461,7 +436,9 @@ public class KomitentiUI extends JFrame {
         String tp = JOptionPane.showInputDialog(this, "Trgovački predstavnik (opcionalno):");
         if (tp == null) tp = "";
         tableModel.addRow(new Object[]{naziv, tp});
-        saveData();
+        // persist immediately
+        KomitentiDatabaseHelper.insertIfNotExists(naziv, tp);
+        loadData();
     }
 
     private void editSelected() {
@@ -481,7 +458,9 @@ public class KomitentiUI extends JFrame {
         if (ntp == null) ntp = "";
         tableModel.setValueAt(nk.trim(), modelRow, 0);
         tableModel.setValueAt(ntp.trim(), modelRow, 1);
-        saveData();
+        // persist change immediately
+        KomitentiDatabaseHelper.upsertList(Collections.singletonList(new KomitentInfo(nk.trim(), ntp.trim())));
+        loadData();
     }
 
     private void assignPredstavnik() {
@@ -492,7 +471,9 @@ public class KomitentiUI extends JFrame {
         String tp = JOptionPane.showInputDialog(this, "Unesi trgovačkog predstavnika za: " + kom);
         if (tp != null) {
             tableModel.setValueAt(tp.trim(), modelRow, 1);
-            saveData();
+            // persist immediately
+            KomitentiDatabaseHelper.insertIfNotExists(kom, tp.trim());
+            loadData();
         }
     }
 
@@ -517,10 +498,22 @@ public class KomitentiUI extends JFrame {
         });
     }
 
+    /**
+     * Stop editing if any editor is active (helper used before save/load/close).
+     */
+    private void stopEditingIfNeeded() {
+        if (table == null) return;
+        if (table.isEditing()) {
+            TableCellEditor ed = table.getCellEditor();
+            if (ed != null) {
+                try { ed.stopCellEditing(); } catch (Exception ignored) { ed.cancelCellEditing(); }
+            }
+        }
+    }
+
     // Optional: small main for manual testing
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            // ensure DB exists
             try { KomitentiDatabaseHelper.initializeDatabase(); } catch (Exception ignored) {}
             new KomitentiUI();
         });
