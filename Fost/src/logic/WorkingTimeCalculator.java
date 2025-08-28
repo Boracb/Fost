@@ -1,8 +1,12 @@
 package logic;
 
 import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Locale;
 
 /**
  * 🕒 Pomoćna klasa za izračun ukupnog radnog vremena između dva datuma/vremena.
@@ -10,114 +14,199 @@ import java.util.*;
  *  - Radno vrijeme (07:00 - 15:00)
  *  - Vikende (subota, nedjelja)
  *  - Neradne dane/blagdane u Hrvatskoj
+ *
+ * Promjene u odnosu na staru verziju:
+ * - Dodana metoda calculateWorkingMinutes(LocalDateTime, LocalDateTime) koja vraća broj radnih minuta.
+ * - calculateWorkingDuration(String, String) sada pokušava koristiti DateUtils.parse (ako postoji),
+ *   ali ima i internu otpornu parsiranje (tryParseLocalDateTime) kao fallback.
+ * - Korišten je ConcurrentHashMap za keširanje blagdana po godini radi sigurnosti i performansi.
+ * - Pojednostavljen i robusniji flow: UI može pozvati calculateWorkingMinutes direktno i formatirati HH:mm.
  */
 public class WorkingTimeCalculator {
 
-    // ⏰ Početak i kraj radnog vremena
+    // ⏰ Početak i kraj radnog vremena (možeš prilagoditi po potrebi)
     private static final LocalTime WORK_START = LocalTime.of(7, 0);
     private static final LocalTime WORK_END   = LocalTime.of(15, 0);
 
-    // Cache za već izračunate blagdane po godini
-    private static final Map<Integer, Set<LocalDate>> HOLIDAY_CACHE = new HashMap<>();
+    // Keš blagdana po godini (thread-safe)
+    private static final Map<Integer, Set<LocalDate>> HOLIDAY_CACHE = new ConcurrentHashMap<>();
 
     /**
-     * 📏 Izračun radnog trajanja između dva vremena, unutar definiranog radnog vremena.
-     * @param startStr početni datum/vrijeme (string)
-     * @param endStr   završni datum/vrijeme (string)
-     * @return         format "sat X minuta Y"
+     * Izračun radnog trajanja između dva stringa (pokušava normalizirati/parsirati stringove).
+     * @param startStr početni datum/vrijeme (različiti formati podržani)
+     * @param endStr završni datum/vrijeme (različiti formati podržani)
+     * @return format "sat X minuta Y"
      */
     public static String calculateWorkingDuration(String startStr, String endStr) {
-        // Normalizacija formata datuma/vremena
-        String startNorm = DateUtils.normalize(startStr);
-        String endNorm   = DateUtils.normalize(endStr);
+        LocalDateTime start = null;
+        LocalDateTime end = null;
 
-        // Parsiranje u LocalDateTime
-        LocalDateTime start = DateUtils.parse(startNorm);
-        LocalDateTime end   = DateUtils.parse(endNorm);
+        // Pokušaj koristiti DateUtils ako je dostupan (stari kod je koristio DateUtils.normalize/parse).
+        try {
+            // Ako DateUtils postoji u projektu, ova dva poziva će raditi; u slučaju da klase nema,
+            // hvata se Exception i prelazi na fallback parsiranje.
+            String sStartNorm = null;
+            String sEndNorm = null;
+            try {
+                // pokušaj refleksijom pozvati DateUtils.normalize/parse (ako klasa postoji)
+                Class<?> du = Class.forName("logic.DateUtils");
+                try {
+                    // normalize ako postoji
+                    try {
+                        java.lang.reflect.Method mNorm = du.getMethod("normalize", String.class);
+                        sStartNorm = (String) mNorm.invoke(null, startStr);
+                        sEndNorm = (String) mNorm.invoke(null, endStr);
+                    } catch (NoSuchMethodException ignored) {
+                        sStartNorm = startStr;
+                        sEndNorm = endStr;
+                    }
+                    // parse ako postoji
+                    try {
+                        java.lang.reflect.Method mParse = du.getMethod("parse", String.class);
+                        Object ps = mParse.invoke(null, sStartNorm);
+                        if (ps instanceof LocalDateTime) start = (LocalDateTime) ps;
+                        Object pe = mParse.invoke(null, sEndNorm);
+                        if (pe instanceof LocalDateTime) end = (LocalDateTime) pe;
+                    } catch (NoSuchMethodException ignored) {
+                        // fallback
+                    }
+                } catch (Exception ex) {
+                    // fallback
+                }
+            } catch (ClassNotFoundException cnf) {
+                // DateUtils not present -> fallback parsing below
+            }
+        } catch (Throwable t) {
+            // fallback, nastavljamo
+        }
 
-        // Ako su datumi neispravni ili završetak nije nakon početka
+        // Ako DateUtils nije dao rezultat, pokušaj interno parsirati
+        if (start == null) start = tryParseLocalDateTime(startStr);
+        if (end == null) end = tryParseLocalDateTime(endStr);
+
         if (start == null || end == null || !end.isAfter(start)) {
             return "sat 0 minuta 0";
         }
 
+        long totalMinutes = calculateWorkingMinutes(start, end);
+        long hours = totalMinutes / 60;
+        long minutes = totalMinutes % 60;
+        return String.format("sat %d minuta %d", hours, minutes);
+    }
+
+    /**
+     * Robusni izračun radnih minuta između dva LocalDateTime-a.
+     * Uklanja potrebu za parsiranjem tekstualnog outputa iz calculateWorkingDuration.
+     * @param start početak
+     * @param end kraj (ako end <= start vraća 0)
+     * @return ukupne radne minute unutar intervala (uzimajući u obzir radno vrijeme, vikende i blagdane)
+     */
+    public static long calculateWorkingMinutes(LocalDateTime start, LocalDateTime end) {
+        if (start == null || end == null) return 0L;
+        if (!end.isAfter(start)) return 0L;
+
         LocalDate startDate = start.toLocalDate();
         LocalDate endDate   = end.toLocalDate();
-        long totalMinutes = 0;
 
-        // 📅 Skupljanje svih blagdana između početne i završne godine
+        long totalMinutes = 0L;
+
+        // Skupljanje blagdana za sve godine u intervalu
         Set<LocalDate> holidays = new HashSet<>();
         for (int y = startDate.getYear(); y <= endDate.getYear(); y++) {
             holidays.addAll(getHolidaysForYear(y));
         }
 
-        // 🔁 Petlja po svim danima u intervalu
-        // Za svaki dan provjerava je li radni dan, i ako jest,
-        // računa radno vrijeme unutar tog dana
-        // uključujući samo radne sate (07:00-15:00)
-        // Preskače vikende i blagdane
-        // Ako segment počinje ili završava unutar radnog vremena, računa samo taj dio
-        // Na kraju zbraja sve radne minute
-        // Vraća ukupno radno vrijeme u satima i minutama
-        // Primjer: ako je start u 14:00, a kraj u 10:00 sljedećeg dana,
-        //	računa 1 sat prvog dana (14:00-15:00)
-        //    i 3 sata drugog dana (07:00-10:00), ukupno 4 sata
-        // Ako je start i kraj isti dan unutar radnog vremena,
-        // računa samo taj interval
-        // Ako je start i kraj izvan radnog vremena,
-        // računa samo preklapanje s radnim vremenom
-        // Ako je cijeli interval izvan radnog vremena,
-        // rezultat je 0 sati 0 minuta
-        // Ako je interval preko vikenda ili blagdana,
-        //	preskače te dane
-        // Ako je interval unutar jednog dana koji je neradni,
-        // rezultat je 0 sati 0 minuta
+        // Iteracija po danima uključujući granice
         for (LocalDate d = startDate; !d.isAfter(endDate); d = d.plusDays(1)) {
             DayOfWeek dow = d.getDayOfWeek();
-            // Preskoči vikende
             if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) continue;
-            // Preskoči blagdane
             if (holidays.contains(d)) continue;
 
-            // Radni period za taj dan
-            LocalDateTime dayStart = LocalDateTime.of(d, WORK_START);
-            LocalDateTime dayEnd   = LocalDateTime.of(d, WORK_END);
+            LocalDateTime dayWorkStart = LocalDateTime.of(d, WORK_START);
+            LocalDateTime dayWorkEnd   = LocalDateTime.of(d, WORK_END);
 
-            // Početak i kraj segmenta unutar tog dana
-            LocalDateTime segStart = max(start, dayStart);
-            LocalDateTime segEnd   = min(end, dayEnd);
+            LocalDateTime segStart = max(start, dayWorkStart);
+            LocalDateTime segEnd   = min(end, dayWorkEnd);
 
-            // Ako ima preklapanja, dodaj trajanje u minutama
             if (segEnd.isAfter(segStart)) {
-                totalMinutes += ChronoUnit.MINUTES.between(segStart, segEnd);
+                long minutes = ChronoUnit.MINUTES.between(segStart, segEnd);
+                if (minutes > 0) totalMinutes += minutes;
             }
         }
 
-        // Pretvorba minuta u sate i minute
-        long hours   = totalMinutes / 60;
-        long minutes = totalMinutes % 60;
-
-        return String.format("sat %d minuta %d", hours, minutes);
+        return totalMinutes;
     }
 
-    /** 🔍 Vraća kasniji od dva LocalDateTime objekta */
+    /** Vraća kasniji od dva LocalDateTime objekta */
     private static LocalDateTime max(LocalDateTime a, LocalDateTime b) {
-        return a.isAfter(b) ? a : b;
+        return (a.isAfter(b)) ? a : b;
     }
 
-    /** 🔍 Vraća raniji od dva LocalDateTime objekta */
+    /** Vraća raniji od dva LocalDateTime objekta */
     private static LocalDateTime min(LocalDateTime a, LocalDateTime b) {
-        return a.isBefore(b) ? a : b;
+        return (a.isBefore(b)) ? a : b;
     }
 
     /**
-     * 📅 Interna klasa s popisom hrvatskih državnih blagdana
-     *    (uključujući pokretne blagdane vezane uz Uskrs).
+     * Pokušaj parsirati razne formate datuma i vremena u LocalDateTime.
+     * Podržava: dd.MM.yyyy HH:mm , dd/MM/yyyy HH:mm , d.M.yyyy H:mm , yyyy-MM-dd HH:mm, i varijante bez vremena.
+     * Ako nema vremena, vraća LocalDate at 00:00.
+     */
+    private static LocalDateTime tryParseLocalDateTime(String s) {
+        if (s == null) return null;
+        String str = s.trim();
+        if (str.isEmpty()) return null;
+
+        // Ukloni nepotrebne točke na kraju ili dodatne whitespace-e
+        if (str.endsWith(".")) str = str.substring(0, str.length() - 1).trim();
+
+        DateTimeFormatter[] fmts = new DateTimeFormatter[] {
+            DateTimeFormatter.ofPattern("dd.MM.yyyy H:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("d.M.yyyy H:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("d.M.yyyy HH:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("dd/MM/yyyy H:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("d/M/yyyy H:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("d/M/yyyy HH:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("yyyy-MM-dd H:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("dd.MM.yyyy", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("d.M.yyyy", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("d/M/yyyy", Locale.ENGLISH)
+        };
+
+        for (DateTimeFormatter fmt : fmts) {
+            try {
+                if (fmt.toString().contains("H") || fmt.toString().contains("m")) {
+                    return LocalDateTime.parse(str, fmt);
+                } else {
+                    // parsiraj kao LocalDate i dodaj 00:00
+                    try {
+                        LocalDate ld = LocalDate.parse(str, fmt);
+                        return ld.atStartOfDay();
+                    } catch (DateTimeParseException ignored) {
+                        // nastavi dalje
+                    }
+                }
+            } catch (DateTimeParseException ignored) {
+                // nastavi
+            } catch (Exception ignored) {
+                // ponekad DateTimeFormatter.toString je drugačiji; ignoriraj i nastavi
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Interna klasa s popisom hrvatskih državnih blagdana (uključujući pokretne blagdane vezane uz Uskrs).
      */
     public static class HrHolidays {
         static Set<LocalDate> forYear(int year) {
             Set<LocalDate> s = new HashSet<>();
 
-            // Fiksni blagdani
+            // Fiksni blagdani (uvrsti one koji su relevantni)
             s.add(LocalDate.of(year, 1, 1));   // Nova godina
             s.add(LocalDate.of(year, 1, 6));   // Sveta tri kralja
             s.add(LocalDate.of(year, 5, 1));   // Praznik rada
@@ -132,21 +221,25 @@ public class WorkingTimeCalculator {
 
             // Pokretni blagdani vezani uz Uskrs
             LocalDate easterSunday = easterSunday(year);
-            s.add(easterSunday.plusDays(1));   // Uskrsni ponedjeljak
-            s.add(easterSunday.plusDays(60));  // Tijelovo
+            s.add(easterSunday);                // Uskrs (nedjelja) - obično neradni
+            s.add(easterSunday.plusDays(1));    // Uskrsni ponedjeljak
+            s.add(easterSunday.plusDays(60));   // Tijelovo (ponekad 60 dana poslije)
 
             return s;
         }
 
-        /** 📅 Izračun datuma Uskrsa za određenu godinu */
-        // Algoritam Meeus/Jones/Butcher
-        // Vraća datum Uskrsa kao LocalDate
-        // Primjer: easterSunday(2024) vraća 31. ožujka 2024.
+        /** Izračun datuma Uskrsa (Meeus/Jones/Butcher) */
         private static LocalDate easterSunday(int y) {
-            int a = y % 19, b = y / 100, c = y % 100, d = b / 4, e = b % 4;
-            int f = (b + 8) / 25, g = (b - f + 1) / 3;
+            int a = y % 19;
+            int b = y / 100;
+            int c = y % 100;
+            int d = b / 4;
+            int e = b % 4;
+            int f = (b + 8) / 25;
+            int g = (b - f + 1) / 3;
             int h = (19 * a + b - d - g + 15) % 30;
-            int i = c / 4, k = c % 4;
+            int i = c / 4;
+            int k = c % 4;
             int l = (32 + 2 * e + 2 * i - h - k) % 7;
             int m = (a + 11 * h + 22 * l) / 451;
             int month = (h + l - 7 * m + 114) / 31;
@@ -156,13 +249,20 @@ public class WorkingTimeCalculator {
     }
 
     /**
-     * 📤 Javna metoda za dohvat blagdana izvana (koristi se u drugim klasama)
+     * Javna metoda za dohvat blagdana po godini (keširana).
      */
-    // Kešira rezultate po godini radi performansi
-    // Ako godina već postoji u mapi, vraća postojeći skup
-    // Inače, izračunava nove blagdane i sprema ih u mapu
-    
     public static Set<LocalDate> getHolidaysForYear(int year) {
-        return HOLIDAY_CACHE.computeIfAbsent(year, HrHolidays::forYear);
+        return HOLIDAY_CACHE.computeIfAbsent(year, Yr -> HrHolidays.forYear(Yr));
+    }
+
+    /**
+     * Pomoćna metoda za vanjski test: provjerava je li dan neradni (vikend ili blagdan).
+     */
+    public static boolean isHolidayOrWeekend(LocalDate d) {
+        if (d == null) return false;
+        DayOfWeek dow = d.getDayOfWeek();
+        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) return true;
+        Set<LocalDate> hol = getHolidaysForYear(d.getYear());
+        return hol.contains(d);
     }
 }
