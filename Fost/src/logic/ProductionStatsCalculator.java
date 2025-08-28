@@ -10,6 +10,7 @@ import java.util.*;
  * Kalkulator proizvodnih statistika.
  * Računa ukupno, izrađeno i za izraditi, te dane potrebne za dovršetak.
  */
+
 public class ProductionStatsCalculator {
 
     public static final String KOM = "kom";
