@@ -15,12 +15,11 @@ import java.util.Locale;
  *  - Vikende (subota, nedjelja)
  *  - Neradne dane/blagdane u Hrvatskoj
  *
- * Promjene u odnosu na staru verziju:
- * - Dodana metoda calculateWorkingMinutes(LocalDateTime, LocalDateTime) koja vraća broj radnih minuta.
- * - calculateWorkingDuration(String, String) sada pokušava koristiti DateUtils.parse (ako postoji),
- *   ali ima i internu otpornu parsiranje (tryParseLocalDateTime) kao fallback.
- * - Korišten je ConcurrentHashMap za keširanje blagdana po godini radi sigurnosti i performansi.
- * - Pojednostavljen i robusniji flow: UI može pozvati calculateWorkingMinutes direktno i formatirati HH:mm.
+ * Ova verzija:
+ * - zadržava sve stare značajke,
+ * - sadrži robusno parsiranje stringova u LocalDateTime (fallback ako DateUtils nije dostupan),
+ * - izlaže calculateWorkingMinutes(LocalDateTime, LocalDateTime) koji UI koristi za predviđeni plan isporuke,
+ * - kešira blagdane po godini (thread-safe).
  */
 public class WorkingTimeCalculator {
 
@@ -35,49 +34,38 @@ public class WorkingTimeCalculator {
      * Izračun radnog trajanja između dva stringa (pokušava normalizirati/parsirati stringove).
      * @param startStr početni datum/vrijeme (različiti formati podržani)
      * @param endStr završni datum/vrijeme (različiti formati podržani)
-     * @return format "sat X minuta Y"
+     * @return format "sat X minuta Y" (ili "sat 0 minuta 0" ako neuspješno)
      */
     public static String calculateWorkingDuration(String startStr, String endStr) {
         LocalDateTime start = null;
         LocalDateTime end = null;
 
-        // Pokušaj koristiti DateUtils ako je dostupan (stari kod je koristio DateUtils.normalize/parse).
+        // Pokušaj koristiti DateUtils ako je dostupan (refleksijom)
         try {
-            // Ako DateUtils postoji u projektu, ova dva poziva će raditi; u slučaju da klase nema,
-            // hvata se Exception i prelazi na fallback parsiranje.
-            String sStartNorm = null;
-            String sEndNorm = null;
+            Class<?> du = Class.forName("logic.DateUtils");
             try {
-                // pokušaj refleksijom pozvati DateUtils.normalize/parse (ako klasa postoji)
-                Class<?> du = Class.forName("logic.DateUtils");
+                // normalize ako postoji
                 try {
-                    // normalize ako postoji
-                    try {
-                        java.lang.reflect.Method mNorm = du.getMethod("normalize", String.class);
-                        sStartNorm = (String) mNorm.invoke(null, startStr);
-                        sEndNorm = (String) mNorm.invoke(null, endStr);
-                    } catch (NoSuchMethodException ignored) {
-                        sStartNorm = startStr;
-                        sEndNorm = endStr;
-                    }
-                    // parse ako postoji
-                    try {
-                        java.lang.reflect.Method mParse = du.getMethod("parse", String.class);
-                        Object ps = mParse.invoke(null, sStartNorm);
-                        if (ps instanceof LocalDateTime) start = (LocalDateTime) ps;
-                        Object pe = mParse.invoke(null, sEndNorm);
-                        if (pe instanceof LocalDateTime) end = (LocalDateTime) pe;
-                    } catch (NoSuchMethodException ignored) {
-                        // fallback
-                    }
-                } catch (Exception ex) {
-                    // fallback
-                }
-            } catch (ClassNotFoundException cnf) {
-                // DateUtils not present -> fallback parsing below
+                    java.lang.reflect.Method mNorm = du.getMethod("normalize", String.class);
+                    startStr = (String) mNorm.invoke(null, startStr);
+                    endStr = (String) mNorm.invoke(null, endStr);
+                } catch (NoSuchMethodException ignored) { /* ignore */ }
+
+                // parse ako postoji
+                try {
+                    java.lang.reflect.Method mParse = du.getMethod("parse", String.class);
+                    Object ps = mParse.invoke(null, startStr);
+                    if (ps instanceof LocalDateTime) start = (LocalDateTime) ps;
+                    Object pe = mParse.invoke(null, endStr);
+                    if (pe instanceof LocalDateTime) end = (LocalDateTime) pe;
+                } catch (NoSuchMethodException ignored) { /* ignore */ }
+            } catch (Exception ignored) {
+                // if reflection invocation fails, fallback to internal parsing
             }
-        } catch (Throwable t) {
-            // fallback, nastavljamo
+        } catch (ClassNotFoundException ignored) {
+            // DateUtils not present -> fallback parsing below
+        } catch (Throwable ignored) {
+            // any other reflection problem -> continue with fallback
         }
 
         // Ako DateUtils nije dao rezultat, pokušaj interno parsirati
@@ -174,15 +162,18 @@ public class WorkingTimeCalculator {
             DateTimeFormatter.ofPattern("dd.MM.yyyy", Locale.ENGLISH),
             DateTimeFormatter.ofPattern("d.M.yyyy", Locale.ENGLISH),
             DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.ENGLISH),
-            DateTimeFormatter.ofPattern("d/M/yyyy", Locale.ENGLISH)
+            DateTimeFormatter.ofPattern("d/M/yyyy", Locale.ENGLISH),
+            DateTimeFormatter.ISO_LOCAL_DATE_TIME,
+            DateTimeFormatter.ISO_LOCAL_DATE
         };
 
         for (DateTimeFormatter fmt : fmts) {
             try {
-                if (fmt.toString().contains("H") || fmt.toString().contains("m")) {
+                // prvo pokušaj parsirati kao LocalDateTime
+                try {
                     return LocalDateTime.parse(str, fmt);
-                } else {
-                    // parsiraj kao LocalDate i dodaj 00:00
+                } catch (DateTimeParseException ex) {
+                    // pokušaj kao LocalDate i vrati atStartOfDay
                     try {
                         LocalDate ld = LocalDate.parse(str, fmt);
                         return ld.atStartOfDay();
@@ -190,10 +181,8 @@ public class WorkingTimeCalculator {
                         // nastavi dalje
                     }
                 }
-            } catch (DateTimeParseException ignored) {
-                // nastavi
             } catch (Exception ignored) {
-                // ponekad DateTimeFormatter.toString je drugačiji; ignoriraj i nastavi
+                // continue
             }
         }
         return null;

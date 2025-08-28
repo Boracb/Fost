@@ -3,6 +3,7 @@ package logic;
 import javax.swing.table.DefaultTableModel;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
@@ -10,7 +11,6 @@ import java.util.*;
  * Kalkulator proizvodnih statistika.
  * Računa ukupno, izrađeno i za izraditi, te dane potrebne za dovršetak.
  */
-
 public class ProductionStatsCalculator {
 
     public static final String KOM = "kom";
@@ -61,6 +61,9 @@ public class ProductionStatsCalculator {
                 if (datum == null) datum = toDate(model.getValueAt(r, 1));
                 if (datum != null) m2PoDanuIzradjeno.merge(datum, m2, Double::sum);
             } else if (statusNorm.equals("u izradi") || statusNorm.isEmpty()) {
+                komZai += kom; m2Zai += m2; netoZai += neto;
+            } else {
+                // treat unknown statuses as "za izraditi" (conservative)
                 komZai += kom; m2Zai += m2; netoZai += neto;
             }
         }

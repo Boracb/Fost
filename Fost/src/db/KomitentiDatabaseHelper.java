@@ -1,11 +1,6 @@
 package db;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -15,23 +10,18 @@ import javax.swing.table.DefaultTableModel;
 import model.KomitentInfo;
 
 /**
- * KomitentiDatabaseHelper
- *
- * Safety changes:
- * - saveToDatabase(...) više NE radi DELETE ALL; umjesto toga radi upsertList (sigurno).
- * - Ako trebaš eksplicitno zamijeniti cijelu tablicu, koristi replaceAllInDatabase(...) koja radi DELETE+INSERT
- * - clearTable() sada ispisuje log kad se pozove (da lakše pratiš tko briše bazu).
- *
- * Napomena: prije bilo kakve promjene baze napravi backup fost.db.
+ * KomitentiDatabaseHelper - sigurnija verzija koja osigurava PRIMARY KEY na komitentOpis
+ * i radi migraciju ako tablica postoji bez PK-a.
  */
 public class KomitentiDatabaseHelper {
 
     private static final String DB_URL = "jdbc:sqlite:fost.db";
     private static final String TABLE_NAME = "komitenti";
 
+    // Create table with PRIMARY KEY on komitentOpis
     private static final String SQL_CREATE_TABLE =
             "CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " (" +
-                    "komitentOpis TEXT NOT NULL, " +
+                    "komitentOpis TEXT PRIMARY KEY, " +
                     "trgovackiPredstavnik TEXT" +
                     ")";
 
@@ -66,13 +56,62 @@ public class KomitentiDatabaseHelper {
 
     // ===== Initialization =====
     public static void initializeDatabase() {
-        try (Connection conn = DriverManager.getConnection(DB_URL);
-             Statement stmt = conn.createStatement()) {
-            stmt.execute(SQL_CREATE_TABLE);
-            System.out.println("KomitentiDatabaseHelper: DB path = " + new java.io.File("fost.db").getAbsolutePath());
+        try (Connection conn = DriverManager.getConnection(DB_URL)) {
+            conn.setAutoCommit(false);
+            // Ako tablica postoji, provjeri ima li PK; ako nema, migriraj podatke u novu tablicu s PK
+            boolean needMigration = false;
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?")) {
+                ps.setString(1, TABLE_NAME);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        // table exists - check schema for PRIMARY KEY on komitentOpis
+                        try (Statement st = conn.createStatement();
+                             ResultSet cols = st.executeQuery("PRAGMA table_info('" + TABLE_NAME + "')")) {
+                            boolean hasPK = false;
+                            while (cols.next()) {
+                                String colName = cols.getString("name");
+                                int pk = cols.getInt("pk");
+                                if ("komitentOpis".equalsIgnoreCase(colName) && pk > 0) {
+                                    hasPK = true;
+                                    break;
+                                }
+                            }
+                            if (!hasPK) needMigration = true;
+                        }
+                    } else {
+                        // table doesn't exist - create with PK
+                        try (Statement st = conn.createStatement()) {
+                            st.execute(SQL_CREATE_TABLE);
+                        }
+                    }
+                }
+            }
+
+            if (needMigration) {
+                System.out.println("KomitentiDatabaseHelper: migrating table to add PRIMARY KEY on komitentOpis");
+                // create temp table with PK, copy distinct rows (keep first non-empty predstavnik), drop old, rename
+                String tmp = TABLE_NAME + "_tmp_new";
+                try (Statement st = conn.createStatement()) {
+                    st.execute("CREATE TABLE IF NOT EXISTS " + tmp + " (komitentOpis TEXT PRIMARY KEY, trgovackiPredstavnik TEXT)");
+                    // copy distinct: choose first non-empty predstavnik
+                    st.execute("INSERT OR IGNORE INTO " + tmp + " (komitentOpis, trgovackiPredstavnik) " +
+                            "SELECT komitentOpis, COALESCE(trgovackiPredstavnik, '') FROM " + TABLE_NAME + " GROUP BY komitentOpis");
+                    st.execute("DROP TABLE " + TABLE_NAME);
+                    st.execute("ALTER TABLE " + tmp + " RENAME TO " + TABLE_NAME);
+                }
+            }
+
+            // ensure table exists in final form
+            try (Statement st = conn.createStatement()) {
+                st.execute(SQL_CREATE_TABLE);
+            }
+
+            conn.commit();
         } catch (SQLException e) {
             e.printStackTrace();
         }
+        System.out.println("KomitentiDatabaseHelper: DB path = " + new java.io.File("fost.db").getAbsolutePath());
     }
 
     // ===== Delete all records (explicit) =====
@@ -86,12 +125,7 @@ public class KomitentiDatabaseHelper {
         }
     }
 
-    /**
-     * Legacy behaviour replaced: saveToDatabase više ne briše cijelu tablicu.
-     * Ovo će raditi sigurno (upsert) - neće brišiti postojeće zapise.
-     */
     public static synchronized void saveToDatabase(List<KomitentInfo> lista) {
-        // Sačuvaj pomoću upsert-a - sigurno
         if (lista == null) return;
         upsertList(lista);
     }
@@ -112,11 +146,6 @@ public class KomitentiDatabaseHelper {
         upsertList(lista);
     }
 
-    /**
-     * EXPERIMENTAL / EXPLICIT replacement method.
-     * Ako želite da program briše tablicu pa onda ubaci tačno ovu listu,
-     * pozovite ovu metodu eksplicitno.
-     */
     public static synchronized void replaceAllInDatabase(List<KomitentInfo> lista) {
         System.out.println("KomitentiDatabaseHelper.replaceAllInDatabase() - replacing all rows (DELETE + INSERT)");
         if (lista == null) lista = new ArrayList<>();
@@ -139,7 +168,6 @@ public class KomitentiDatabaseHelper {
         }
     }
 
-    // ===== New: batch UPSERT (preferred) =====
     public static synchronized void upsertList(List<KomitentInfo> lista) {
         if (lista == null || lista.isEmpty()) return;
         try (Connection conn = DriverManager.getConnection(DB_URL)) {
@@ -154,7 +182,6 @@ public class KomitentiDatabaseHelper {
                 conn.commit();
                 return;
             } catch (SQLException ex) {
-                // UPSERT failed (likely UNIQUE missing); fallback below
                 System.out.println("KomitentiDatabaseHelper.upsertList: UPSERT batch failed: " + ex.getMessage());
                 try { conn.rollback(); } catch (SQLException ignored) {}
             } finally {
@@ -206,7 +233,6 @@ public class KomitentiDatabaseHelper {
         }
     }
 
-    // ===== Load all rows =====
     public static List<Object[]> loadAllRows() {
         List<Object[]> lista = new ArrayList<>();
         try (Connection conn = DriverManager.getConnection(DB_URL);
@@ -224,7 +250,6 @@ public class KomitentiDatabaseHelper {
         return lista;
     }
 
-    // ===== Filter by representative =====
     public static List<Object[]> loadAllRowsByPredstavnik(String predstavnik) {
         List<Object[]> lista = new ArrayList<>();
         try (Connection conn = DriverManager.getConnection(DB_URL);
@@ -244,7 +269,6 @@ public class KomitentiDatabaseHelper {
         return lista;
     }
 
-    // ===== Delete row by komitentOpis =====
     public static void deleteRow(String komitentOpis, String trgovackiPredstavnik) {
         if (komitentOpis == null || komitentOpis.isBlank()) return;
         try (Connection conn = DriverManager.getConnection(DB_URL);
@@ -256,7 +280,6 @@ public class KomitentiDatabaseHelper {
         }
     }
 
-    // ===== Map komitent -> predstavnik =====
     public static Map<String, String> loadKomitentPredstavnikMap() {
         Map<String, String> mapa = new HashMap<>();
         try (Connection conn = DriverManager.getConnection(DB_URL);
@@ -278,7 +301,6 @@ public class KomitentiDatabaseHelper {
         return mapa;
     }
 
-    // ===== Lists of unique values =====
     public static List<String> loadAllKomitentNames() {
         return loadDistinctList(SQL_DISTINCT_KOMITENTI, "komitentOpis");
     }
@@ -303,15 +325,10 @@ public class KomitentiDatabaseHelper {
         return lista;
     }
 
-    /**
-     * Insert or update komitent - single row helper.
-     * Tries UPSERT first; if that fails, falls back to per-row check/insert/update.
-     */
     public static synchronized boolean insertIfNotExists(String komitentOpis, String trgovackiPredstavnik) {
         if (komitentOpis == null || komitentOpis.isBlank()) return false;
         if (trgovackiPredstavnik == null) trgovackiPredstavnik = "";
 
-        // Try UPSERT first
         try (Connection conn = DriverManager.getConnection(DB_URL);
              PreparedStatement ps = conn.prepareStatement(SQL_INSERT_UPSERT)) {
             ps.setString(1, komitentOpis.trim());
@@ -322,14 +339,13 @@ public class KomitentiDatabaseHelper {
             System.out.println("insertIfNotExists: UPSERT failed, falling back. Reason: " + ex.getMessage());
         }
 
-        // Fallback non-atomic behaviour
+        // fallback
         try (Connection conn = DriverManager.getConnection(DB_URL)) {
             try (PreparedStatement check = conn.prepareStatement(
                     "SELECT COUNT(*) FROM " + TABLE_NAME + " WHERE komitentOpis = ?")) {
                 check.setString(1, komitentOpis.trim());
                 try (ResultSet rs = check.executeQuery()) {
                     if (rs.next() && rs.getInt(1) > 0) {
-                        // optionally update predstavnik if non-empty
                         if (trgovackiPredstavnik != null && !trgovackiPredstavnik.isBlank()) {
                             try (PreparedStatement upd = conn.prepareStatement(
                                     "UPDATE " + TABLE_NAME + " SET trgovackiPredstavnik = ? WHERE komitentOpis = ?")) {
