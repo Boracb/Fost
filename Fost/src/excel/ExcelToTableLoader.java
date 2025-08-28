@@ -16,10 +16,12 @@ import java.util.Date;
 /**
  * Klasa za uvoz Excel (.xlsx) datoteka u DefaultTableModel.
  * Omogućuje učitavanje podataka i izračun izvedenih vrijednosti (mm, m, tisucl, m2).
+ *
+ * Pravilo uvoza: nazivRobe (kolona 3) mora biti NE-prazan i mora sadržavati znak '/'.
+ * komitentOpis (kolona 2) može biti prazan.
  */
-// * - Podržava različite formate ćelija (string, broj, datum, formula).
 public class ExcelToTableLoader {
-// Stil za datume "dd.MM.yyyy"
+    // Stil za datume "dd.MM.yyyy"
     private static final SimpleDateFormat DATE_FMT_DOTS = new SimpleDateFormat("dd.MM.yyyy");
 
     /**
@@ -36,6 +38,7 @@ public class ExcelToTableLoader {
         }
 
         File file = chooser.getSelectedFile();
+        int imported = 0;
 
         try (FileInputStream fis = new FileInputStream(file);
              Workbook wb = new XSSFWorkbook(fis)) {
@@ -47,11 +50,28 @@ public class ExcelToTableLoader {
                 Row row = sheet.getRow(r);
                 if (row == null) continue;
 
+                // Read komitentOpis and nazivRobe first, normalize and decide whether to skip
+                String komitentOpis = getCellString(row, 2);
+                String nazivRobe   = getCellString(row, 3);
+
+                komitentOpis = komitentOpis == null ? "" : komitentOpis.trim();
+                nazivRobe   = nazivRobe == null ? "" : nazivRobe.trim();
+
+                // New rule: nazivRobe is required and must contain '/'
+                if (nazivRobe.isEmpty()) {
+                    // skip
+                    continue;
+                }
+                if (nazivRobe.indexOf('/') < 0) {
+                    // skip rows without '/'
+                    continue;
+                }
+
                 Object[] data = new Object[15];
                 data[0]  = getCellDateDots(row, 0);
                 data[1]  = getCellDateDots(row, 1);
-                data[2]  = getCellString(row, 2);
-                data[3]  = getCellString(row, 3);
+                data[2]  = komitentOpis;
+                data[3]  = nazivRobe;
                 data[4]  = safeDoubleFromCell(row.getCell(4));
                 data[5]  = safeIntegerFromCell(row.getCell(5));
                 data[6]  = getCellString(row, 6);
@@ -67,6 +87,13 @@ public class ExcelToTableLoader {
                 data[14] = getCellString(row, 14);
 
                 model.addRow(data);
+                imported++;
+            }
+
+            if (imported == 0) {
+                JOptionPane.showMessageDialog(null, "Nije uvezen niti jedan redak: naziv artikla je obavezan i mora sadržavati '/'", "Uvoz završen", JOptionPane.INFORMATION_MESSAGE);
+            } else {
+                JOptionPane.showMessageDialog(null, "Uvezeno redaka: " + imported, "Uvoz završen", JOptionPane.INFORMATION_MESSAGE);
             }
 
         } catch (IOException ex) {
@@ -78,23 +105,22 @@ public class ExcelToTableLoader {
     /**
      * Računa izvedene vrijednosti (mm, m, tisucl, m2) na temelju naziva robe i količine.
      */
-    // Indeksi posebnih kolona (0-based)
-    // Naziv robe (kolona 3) sadrži "mm/m" format
-    // Količina (kolona 5) je broj komada
-    //	 Izvedene kolone: mm (8), m (9), tisucl (10), m2 (11)
-    // Ako je mm ili m nepoznato, postavlja null
-    // Ako je količina 0 ili nepoznata, m2 postavlja null
-    // Zaokružuje na 3 decimale
     public static void calculateDerived(DefaultTableModel model) {
         for (int r = 0; r < model.getRowCount(); r++) {
-            String nazivRobe = (String) model.getValueAt(r, 3);
+            String nazivRobe = model.getValueAt(r, 3) == null ? "" : model.getValueAt(r, 3).toString();
             double[] pair = parseDoublePair(nazivRobe);
 
             Double mm   = pair[0] == 0.0 ? null : round(pair[0], 3);
             Double mVal = pair[1] == 0.0 ? null : round(pair[1], 3);
 
             Double tisucl = (mm == null || mVal == null) ? null : round((mm / 1000.0) * mVal, 3);
-            Number komNum = (Number) model.getValueAt(r, 5);
+            Number komNum = null;
+            try {
+                Object komObj = model.getValueAt(r, 5);
+                if (komObj instanceof Number) komNum = (Number) komObj;
+                else if (komObj != null && !komObj.toString().trim().isEmpty())
+                    komNum = Double.parseDouble(komObj.toString().trim());
+            } catch (Exception ignored) {}
             double kom    = komNum == null ? 0.0 : komNum.doubleValue();
             Double m2     = (tisucl == null || kom == 0.0) ? null : round(tisucl * kom, 3);
 
@@ -106,7 +132,6 @@ public class ExcelToTableLoader {
     }
 
     // ====== POMOĆNE METODE ZA ČITANJE ĆELIJA ======
-//* Dohvaća sadržaj ćelije kao String, bez obzira na tip ćelije.
     private static String getCellString(Row row, int c) {
         Cell cell = row.getCell(c);
         if (cell == null) return "";
@@ -116,7 +141,7 @@ public class ExcelToTableLoader {
             case NUMERIC:
                 if (DateUtil.isCellDateFormatted(cell)) {
                     Date d = cell.getDateCellValue();
-                    String fmt = cell.getCellStyle().getDataFormatString();
+                    String fmt = cell.getCellStyle() != null ? cell.getCellStyle().getDataFormatString() : null;
                     boolean hasTime = fmt != null && fmt.toLowerCase().contains("h");
                     String pattern = hasTime ? "dd.MM.yyyy HH:mm" : "dd.MM.yyyy";
                     return new SimpleDateFormat(pattern).format(d);
@@ -131,17 +156,19 @@ public class ExcelToTableLoader {
                     CellValue cv = ev.evaluate(cell);
                     if (cv == null) return "";
                     switch (cv.getCellType()) {
-                        case STRING:  return cv.getStringValue().trim();
+                        case STRING:
+                            return cv.getStringValue().trim();
                         case NUMERIC:
                             if (DateUtil.isCellDateFormatted(cell)) {
                                 Date d = DateUtil.getJavaDate(cv.getNumberValue());
-                                String fmt2 = cell.getCellStyle().getDataFormatString();
+                                String fmt2 = cell.getCellStyle() != null ? cell.getCellStyle().getDataFormatString() : null;
                                 boolean hasTime2 = fmt2 != null && fmt2.toLowerCase().contains("h");
                                 String pattern2 = hasTime2 ? "dd.MM.yyyy HH:mm" : "dd.MM.yyyy";
                                 return new SimpleDateFormat(pattern2).format(d);
                             }
                             return stripTrailingZeros(cv.getNumberValue());
-                        case BOOLEAN: return Boolean.toString(cv.getBooleanValue());
+                        case BOOLEAN:
+                            return Boolean.toString(cv.getBooleanValue());
                     }
                 } catch (Exception e) {
                     return cell.toString().trim();
@@ -150,7 +177,7 @@ public class ExcelToTableLoader {
                 return cell.toString().trim();
         }
     }
-//* Dohvaća sadržaj ćelije kao String, ako je datum formatira kao "dd.MM.yyyy".
+
     private static String getCellDateDots(Row row, int c) {
         Cell cell = row.getCell(c);
         if (cell != null && cell.getCellType() == CellType.NUMERIC
@@ -159,7 +186,7 @@ public class ExcelToTableLoader {
         }
         return cell == null ? "" : cell.toString().trim();
     }
-//* Sigurno dohvaća Double vrijednost iz ćelije.
+
     private static Double safeDoubleFromCell(Cell cell) {
         if (cell == null) return null;
         try {
@@ -174,6 +201,7 @@ public class ExcelToTableLoader {
                 FormulaEvaluator ev = cell.getSheet().getWorkbook()
                         .getCreationHelper().createFormulaEvaluator();
                 CellValue cv = ev.evaluate(cell);
+                if (cv == null) return null;
                 if (cv.getCellType() == CellType.NUMERIC) return cv.getNumberValue();
                 if (cv.getCellType() == CellType.STRING) {
                     String txt = cv.getStringValue().trim().replace(',', '.');
@@ -183,10 +211,7 @@ public class ExcelToTableLoader {
         } catch (Exception ignored) {}
         return null;
     }
-    /**
-     * Sigurno dohvaća Integer vrijednost iz ćelije.
-     */
-    // Ako je ćelija decimalni broj, zaokružuje na najbliži cijeli.
+
     private static Integer safeIntegerFromCell(Cell cell) {
         if (cell == null) return null;
         try {
@@ -203,6 +228,7 @@ public class ExcelToTableLoader {
                 FormulaEvaluator ev = cell.getSheet().getWorkbook()
                         .getCreationHelper().createFormulaEvaluator();
                 CellValue cv = ev.evaluate(cell);
+                if (cv == null) return null;
                 if (cv.getCellType() == CellType.NUMERIC) return (int) Math.round(cv.getNumberValue());
                 if (cv.getCellType() == CellType.STRING) {
                     String txt = cv.getStringValue().trim();
@@ -214,10 +240,6 @@ public class ExcelToTableLoader {
         return null;
     }
 
-    /**
-     * Parsira string oblika "vrijednost1/vrijednost2" u double par.
-     */
-    // Ako je format neispravan, vraća [0, 0].
     private static double[] parseDoublePair(String s) {
         if (s == null) return new double[]{0, 0};
         String[] parts = s.split("/");
@@ -225,10 +247,6 @@ public class ExcelToTableLoader {
         return new double[]{ parseSafe(parts[0]), parseSafe(parts[1]) };
     }
 
-    /**
-     * Sigurno parsira string u double.
-     */
-    // Ako je null, prazan ili neispravan format, vraća 0.0.
     private static double parseSafe(String s) {
         if (s == null) return 0.0;
         s = s.trim().replace(',', '.');
@@ -240,17 +258,11 @@ public class ExcelToTableLoader {
         }
     }
 
-    /**
-     * Uklanja ".0" s kraja ako broj nema decimale.
-     */
     private static String stripTrailingZeros(double val) {
         String s = Double.toString(val);
         return s.endsWith(".0") ? s.substring(0, s.length() - 2) : s;
     }
 
-    /**
-     * Zaokružuje broj na zadani broj decimala.
-     */
     private static Double round(double v, int p) {
         return BigDecimal.valueOf(v)
                 .setScale(p, BigDecimal.ROUND_HALF_UP)

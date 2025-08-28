@@ -1,8 +1,6 @@
 package excel;
 
 import org.apache.poi.ss.usermodel.*;
-
-
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import javax.swing.*;
@@ -15,11 +13,16 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 
-
-//* Klasa za uvoz podataka iz Excel (.xlsx) datoteke u Swing DefaultTableModel.
-//* Koristi Apache POI biblioteku za čitanje Excel datoteke.
-//* Podržava različite tipove ćelija (string, numeric, date, formula).
-//* Izračunava izvedene vrijednosti na temelju uvezenih podataka.
+/**
+ * Klasa za uvoz podataka iz Excel (.xlsx) datoteke u Swing DefaultTableModel.
+ * Koristi Apache POI biblioteku za čitanje Excel datoteke.
+ * Podržava različite tipove ćelija (string, numeric, date, formula).
+ * Izračunava izvedene vrijednosti na temelju uvezenih podataka.
+ *
+ * Pravilo uvoza: nazivRobe (kolona 3) mora biti NE-prazan i mora sadržavati znak '/'.
+ * komitentOpis (kolona 2) može biti prazan.
+ * Redovi koji ne zadovoljavaju uvjete se preskaču.
+ */
 public class ExcelImporter {
 
     private static final SimpleDateFormat DATE_FMT_DOTS = new SimpleDateFormat("dd.MM.yyyy");
@@ -32,6 +35,8 @@ public class ExcelImporter {
         if (chooser.showOpenDialog(null) != JFileChooser.APPROVE_OPTION) return;
 
         File file = chooser.getSelectedFile();
+        int importedCount = 0;
+
         try (FileInputStream fis = new FileInputStream(file);
              Workbook wb = new XSSFWorkbook(fis)) {
 
@@ -42,18 +47,36 @@ public class ExcelImporter {
                 Row row = sheet.getRow(r);
                 if (row == null) continue;
 
+                // Read ključna polja za odluku: komitentOpis i nazivRobe
+                String komitentOpis = getCellString(row, 2);
+                String nazivRobe = getCellString(row, 3);
+
+                komitentOpis = komitentOpis == null ? "" : komitentOpis.trim();
+                nazivRobe = nazivRobe == null ? "" : nazivRobe.trim();
+
+                // New rule: nazivRobe must be non-empty AND must contain '/'
+                if (nazivRobe.isEmpty()) {
+                    // skip: naziv artikla obavezan
+                    // System.out.println("ExcelImporter: preskočen red " + r + " jer nazivRobe je prazan.");
+                    continue;
+                }
+                if (nazivRobe.indexOf('/') < 0) {
+                    // skip: naziv must contain '/'
+                    // System.out.println("ExcelImporter: preskočen red " + r + " jer nazivRobe ne sadrži '/': " + nazivRobe);
+                    continue;
+                }
+
                 Object[] data = new Object[16];
 
                 data[0]  = getCellDateDots(row, 0);              // datumNarudzbe
                 data[1]  = getCellDateDots(row, 1);              // predDatumIsporuke
-                data[2]  = getCellString(row, 2);                // komitentOpis
-                data[3]  = getCellString(row, 3);                // nazivRobe
+                data[2]  = komitentOpis;                         // komitentOpis (može biti prazno)
+                data[3]  = nazivRobe;                            // nazivRobe (obavezan, s '/')
                 data[4]  = safeDoubleFromCell(row.getCell(4));   // netoVrijednost
                 data[5]  = safeIntegerFromCell(row.getCell(5));  // kom
                 data[6]  = getCellString(row, 6);                // status
 
                 // -- POPRAVLJENA LOGIKA ZA DJELATNIK --
-             
                 Cell djelatnikCell = row.getCell(7);
                 String djelatnikName = "";
                 if (djelatnikCell != null) {
@@ -81,28 +104,21 @@ public class ExcelImporter {
                 data[15] = getCellString(row, 15);
 
                 model.addRow(data);
+                importedCount++;
             }
 
-            // Izračun izvedenih vrijednosti
-            // mm/m = iz kolone "nazivRobe" (format "mm/m")
-            // tisucl = (mm / 1000) * m
-            // m2 = tisucl * kom
-            // Zaokruživanje na 3 decimale
-            // Postavlja se u kolone 8, 9, 10, 11
-            // Indeksi kolona: 3=nazivRobe, 5=kom, 8=mm, 9=m, 10=tisucl, 11=m2
-            // Primjer: nazivRobe="50/20", kom=3 → mm=50, m=20, tisucl=1.0, m2=3.0
-            // Ako je nazivRobe=""/neispravan format → mm=null, m=null, tisucl=null, m2=null
-            // Ako je kom=null/0 → m2=null
-            // Ako je mm=0 ili m=0 → tisucl=null
-            // Ako je tisucl=0 ili kom=0 → m2=null
-            
+            // Izračun izvedenih vrijednosti (kao prije)
             for (int r = 0; r < model.getRowCount(); r++) {
                 String nazivRobe = model.getValueAt(r, 3) != null ? model.getValueAt(r, 3).toString() : "";
                 double[] pair = parseDoublePair(nazivRobe);
                 Double mm = pair[0] == 0.0 ? null : round(pair[0], 3);
                 Double mVal = pair[1] == 0.0 ? null : round(pair[1], 3);
                 Double tisucl = (mm == null || mVal == null) ? null : round((mm / 1000.0) * mVal, 3);
-                Number komNum = (Number) model.getValueAt(r, 5);
+                Number komNum = null;
+                try {
+                    Object komObj = model.getValueAt(r, 5);
+                    komNum = komObj instanceof Number ? (Number) komObj : (komObj == null || komObj.toString().trim().isEmpty() ? null : Double.parseDouble(komObj.toString()));
+                } catch (Exception ignored) {}
                 double kom = komNum == null ? 0.0 : komNum.doubleValue();
                 Double m2 = (tisucl == null || kom == 0.0) ? null : round(tisucl * kom, 3);
 
@@ -112,23 +128,18 @@ public class ExcelImporter {
                 model.setValueAt(m2, r, 11);
             }
 
+            if (importedCount == 0) {
+                JOptionPane.showMessageDialog(null, "Nije uvezen niti jedan redak: nema valjanih naziva artikala (naziv mora biti ne-prazan i sadržavati '/').", "Uvoz završen", JOptionPane.INFORMATION_MESSAGE);
+            } else {
+                JOptionPane.showMessageDialog(null, "Uvezeno redaka: " + importedCount, "Uvoz završen", JOptionPane.INFORMATION_MESSAGE);
+            }
+
         } catch (IOException ex) {
             JOptionPane.showMessageDialog(null, "Greška pri uvozu:\n" + ex.getMessage(),
                     "Greška", JOptionPane.ERROR_MESSAGE);
         }
     }
     // ====== pomoćne metode ======
-//    // Dohvaća sadržaj ćelije kao String, bez obzira na tip ćelije
-    // Ako je ćelija prazna/NULL, vraća prazan String.
-    // Za datume koristi format "dd.MM.yyyy".
-    // Za numeričke vrijednosti uklanja nepotrebne decimale (npr. 10.0 → "10").
-    // Za formule evaluira formulu i vraća rezultat kao String.
-    // Ako evaluacija ne uspije, vraća prazan String.
-    // Ako je tip ćelije nepoznat, koristi cell.toString().
-    // U slučaju greške vraća prazan String.
-    // Indeksi kolona: 0=datumNarudzbe, 1=predDatumIsporuke, 2=komitentOpis,
-    // 3=nazivRobe, 4=netoVrijednost, 5=kom, 6=status, 7=djelatnik
-    // 15=trgovackiPredstavnik
     private static String getCellString(Row row, int c) {
         Cell cell = row.getCell(c);
         if (cell == null) return "";
@@ -159,7 +170,6 @@ public class ExcelImporter {
         } catch (Exception ignored) {}
         return cell.toString().trim();
     }
-//    // Dohvaća sadržaj ćelije kao String, ali samo ako je ćelija datum.
     private static String getCellDateDots(Row row, int idx) {
         Cell c = row.getCell(idx);
         if (c != null && c.getCellType() == CellType.NUMERIC
@@ -168,7 +178,6 @@ public class ExcelImporter {
         }
         return c == null ? "" : c.toString().trim();
     }
-//    // Sigurno dohvaća Double iz ćelije.
     private static Double safeDoubleFromCell(Cell cell) {
         if (cell == null) return null;
         try {
@@ -193,7 +202,6 @@ public class ExcelImporter {
         } catch (Exception ignored) {}
         return null;
     }
- //   // Sigurno dohvaća Integer iz ćelije.
     private static Integer safeIntegerFromCell(Cell cell) {
         if (cell == null) return null;
         try {
@@ -218,14 +226,12 @@ public class ExcelImporter {
         } catch (Exception ignored) {}
         return null;
     }
-//    // Parsira string u obliku "num1/num2" u niz od dva double broja.
     private static double[] parseDoublePair(String s) {
         if (s == null) return new double[]{0, 0};
         String[] p = s.split("/");
         if (p.length != 2) return new double[]{0, 0};
         return new double[]{ parseSafe(p[0]), parseSafe(p[1]) };
     }
-//    // Sigurno parsira string u double.
     private static double parseSafe(String s) {
         if (s == null) return 0;
         s = s.trim().replace(',', '.');
@@ -236,12 +242,10 @@ public class ExcelImporter {
             return 0;
         }
     }
-//    // Uklanja nepotrebne decimale iz double vrijednosti (npr. 10.0 → "10").
     private static String stripTrailingZeros(double v) {
         String str = Double.toString(v);
         return str.endsWith(".0") ? str.substring(0, str.length() - 2) : str;
     }
-//    // Zaokružuje double na p decimala.
     private static Double round(double v, int p) {
         return BigDecimal.valueOf(v)
                          .setScale(p, RoundingMode.HALF_UP)
