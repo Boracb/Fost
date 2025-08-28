@@ -148,7 +148,7 @@ public class UI {
             }
         };
 
-        table = new JTable(tableModel);
+        table = new DoubleClickTable(tableModel);
         sorter = new TableRowSorter<>(tableModel);
         table.setRowSorter(sorter);
 
@@ -1380,6 +1380,29 @@ public class UI {
             new LoginUI();
         });
     }
+ // Unutar klase UI, dodaj ovu unutarnju klasu:
+    private static class DoubleClickTable extends JTable {
+        public DoubleClickTable(TableModel model) {
+            super(model);
+        }
 
+        // Override editCellAt to require double-click for mouse events
+        @Override
+        public boolean editCellAt(int row, int column, EventObject e) {
+            // If editing was started by a mouse event, require double-click
+            if (e instanceof MouseEvent) {
+                MouseEvent me = (MouseEvent) e;
+                if (me.getClickCount() < 2) {
+                    // do not start editing on single click
+                    return false;
+                }
+            }
+            // allow keyboard / programmatic editing
+            return super.editCellAt(row, column, e);
+        }
+
+        // Also override processMouseEvent to avoid some look-and-feel shortcuts
+        // (optional) — but not necessary in most cases.
+    }
     // --- Kraj klase ---
 }
