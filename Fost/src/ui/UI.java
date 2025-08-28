@@ -93,6 +93,10 @@ public class UI {
                         JOptionPane.YES_NO_CANCEL_OPTION
                 );
                 if (res == JOptionPane.YES_OPTION) {
+                    if (table.isEditing()) {
+                        TableCellEditor ed = table.getCellEditor();
+                        if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+                    }
                     DatabaseHelper.saveToDatabase(tableModel);
                     UserDatabaseHelper.saveUserTableSettings(prijavljeniKorisnik, table);
                     frame.dispose();
@@ -241,14 +245,23 @@ public class UI {
             ExcelExporter.exportTableToExcel(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Kliknuo IZVEZI iz Excel");
         });
+
         JButton btnSaveDb  = new JButton("Spremi u bazu");
         btnSaveDb.addActionListener(e -> {
+            if (table.isEditing()) {
+                TableCellEditor ed = table.getCellEditor();
+                if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+            }
             DatabaseHelper.saveToDatabase(tableModel);
             UserDatabaseHelper.saveUserTableSettings(prijavljeniKorisnik, table);
             ActionLogger.log(prijavljeniKorisnik, "Spremio u bazu");
         });
         JButton btnLoadDb  = new JButton("Učitaj iz baze");
         btnLoadDb.addActionListener(e -> {
+            if (table.isEditing()) {
+                TableCellEditor ed = table.getCellEditor();
+                if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+            }
             DatabaseHelper.loadFromDatabase(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Učitao iz baze");
         });
@@ -301,12 +314,44 @@ public class UI {
             bottom.add(btnAddUser);
         }
 
+        // NEW: import missing komitenti from current table (orders)
+        JButton btnImportKomitenti = new JButton("Uvezi komitente");
+        btnImportKomitenti.addActionListener(e -> {
+            if (table.isEditing()) {
+                TableCellEditor ed = table.getCellEditor();
+                if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+            }
+            int added = 0;
+            Set<String> existing = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            java.util.List<String> namesFromDb = KomitentiDatabaseHelper.loadAllKomitentNames();
+            if (namesFromDb != null) existing.addAll(namesFromDb);
+            for (int r = 0; r < tableModel.getRowCount(); r++) {
+                Object o = tableModel.getValueAt(r, KOMITENT_OPIS_COL);
+                if (o == null) continue;
+                String naziv = o.toString().trim();
+                if (naziv.isEmpty()) continue;
+                if (!existing.contains(naziv)) {
+                    try {
+                        KomitentiDatabaseHelper.insertIfNotExists(naziv, "");
+                        existing.add(naziv);
+                        added++;
+                    } catch (Exception ex) {
+                        System.out.println("Greška pri insertIfNotExists za: " + naziv + " -> " + ex.getMessage());
+                    }
+                }
+            }
+            komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+            JOptionPane.showMessageDialog(frame, "Uvezeno novih komitenata: " + added);
+            ActionLogger.log(prijavljeniKorisnik, "Uvezao komitente iz tablice, dodano: " + added);
+        });
+
         bottom.add(btnImport);
         bottom.add(btnExport);
         bottom.add(btnSaveDb);
         bottom.add(btnLoadDb);
         bottom.add(btnRefresh);
         bottom.add(btnDelete);
+        bottom.add(btnImportKomitenti);
 
         applyBrutalButtonStyle(bottom);
 
@@ -621,6 +666,7 @@ public class UI {
         java.util.List<String> all = KomitentiDatabaseHelper.loadAllKomitentNames();
         JComboBox<String> combo = new JComboBox<>(all.toArray(new String[0]));
         combo.setEditable(true);
+        combo.setLightWeightPopupEnabled(false); // fix for popup on some LAFs
         combo.addActionListener(e -> {
             Object selObj = combo.getSelectedItem();
             if (selObj != null) {
@@ -667,14 +713,19 @@ public class UI {
 
         JComboBox<String> combo = new JComboBox<>();
         combo.setEditable(true);
+        combo.setLightWeightPopupEnabled(false); // fix for popup issues
 
-        for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) combo.addItem(p);
+        try {
+            for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) combo.addItem(p);
+        } catch (Exception ignored) {}
 
         combo.addPopupMenuListener(new PopupMenuListener() {
             @Override
             public void popupMenuWillBecomeVisible(PopupMenuEvent e) {
-                combo.removeAllItems();
-                for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) combo.addItem(p);
+                try {
+                    combo.removeAllItems();
+                    for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) combo.addItem(p);
+                } catch (Exception ignored) {}
             }
             @Override public void popupMenuWillBecomeInvisible(PopupMenuEvent e) {}
             @Override public void popupMenuCanceled(PopupMenuEvent e) {}
@@ -716,6 +767,7 @@ public class UI {
         TableColumn col = table.getColumnModel().getColumn(viewIdx);
         String[] opcije = {"", "U izradi", "Izrađeno"};
         JComboBox<String> combo = new JComboBox<>(opcije);
+        combo.setLightWeightPopupEnabled(false); // be safer on some LAFs
 
         DefaultCellEditor editor = new DefaultCellEditor(combo) {
             private Object originalValue;
@@ -781,6 +833,7 @@ public class UI {
         if (viewIdx < 0) return;
         TableColumn col = table.getColumnModel().getColumn(viewIdx);
         JComboBox<String> combo = new JComboBox<>(djelatnici);
+        combo.setLightWeightPopupEnabled(false);
         col.setCellEditor(new DefaultCellEditor(combo));
     }
 
@@ -1015,6 +1068,7 @@ public class UI {
     /**
      * Enables centralized double-click handling for opening popups and dialogs.
      */
+ // Zamijeni postojeću metodu enableDoubleClickOpeners ovim kodom u ui/UI.java
     private void enableDoubleClickOpeners() {
         table.addMouseListener(new MouseAdapter() {
             @Override
@@ -1037,7 +1091,30 @@ public class UI {
                                 if (editor != null) {
                                     editor.requestFocus();
                                     if (editor instanceof JComboBox) {
-                                        ((JComboBox<?>) editor).showPopup();
+                                        final JComboBox<?> cb = (JComboBox<?>) editor;
+                                        // Ako je komponenta već prikazana, pokaži odmah popup.
+                                        // Inače odgodi prikaz na EDT (i provjeri ponovno isShowing).
+                                        try {
+                                            if (cb.isShowing()) {
+                                                cb.showPopup();
+                                            } else {
+                                                SwingUtilities.invokeLater(() -> {
+                                                    try {
+                                                        if (cb.isShowing()) cb.showPopup();
+                                                    } catch (IllegalComponentStateException ex) {
+                                                        // dodatna zaštita - ignoriraj ako još uvijek nije prikazano
+                                                        System.out.println("showPopup aborted: " + ex.getMessage());
+                                                    }
+                                                });
+                                            }
+                                        } catch (IllegalComponentStateException ex) {
+                                            // zaštitni fallback
+                                            SwingUtilities.invokeLater(() -> {
+                                                try {
+                                                    if (cb.isShowing()) cb.showPopup();
+                                                } catch (Exception ignored) {}
+                                            });
+                                        }
                                     }
                                 }
                                 System.out.println("Started editing cell at row=" + viewRow + ", col=" + viewCol);
