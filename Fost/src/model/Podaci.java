@@ -117,7 +117,10 @@ public class Podaci {
             this.predPlanIsporuke = null;
         }
     }
-
+   //ovdje dodaj planDatumIsporukeString i setPlanDatumIsporukeFromString
+    
+   
+    
     public KomitentInfo getKomitentInfo() { return komitentInfo; }
     public void setKomitentInfo(KomitentInfo komitentInfo) { this.komitentInfo = komitentInfo; }
 
@@ -157,6 +160,52 @@ public class Podaci {
     public String getTrgovackiPredstavnik() { return trgovackiPredstavnik; }
     public void setTrgovackiPredstavnik(String trgovackiPredstavnik) { this.trgovackiPredstavnik = trgovackiPredstavnik; }
 
+   //motoda planDatumIsporukeString i setPlanDatumIsporukeFromString
+	public String getPredDatumIsporukeString() {
+		return predDatumIsporuke == null ? "" : predDatumIsporuke.format(OUT_DATE);
+	}
+	
+	public void setPredDatumIsporukeFromString(String s) {	
+		if (s == null) {
+			this.predDatumIsporuke = null;
+			return;
+		}
+		String trimmed = s.trim();
+		if (trimmed.isEmpty()) {
+			this.predDatumIsporuke = null;
+			return;
+		}
+
+		// Prvo pokušaj lokalnog formata dd/MM/yyyy
+		try {
+			LocalDate ld = LocalDate.parse(trimmed, OUT_DATE);
+			this.predDatumIsporuke = ld;
+			return;
+		} catch (Exception ignored) {
+		}
+
+		// Fallback: pokušaj parsiranja pomoću DateUtils (vrati LocalDateTime ->
+		// LocalDate)
+		try {
+			LocalDateTime dt = DateUtils.parse(trimmed);
+			if (dt != null) {
+				this.predDatumIsporuke = dt.toLocalDate();
+				return;
+			}
+		} catch (Exception ignored) {
+		}
+
+		// Ako ništa ne radi, pokušaj još sa ISO formatom
+		try {
+			LocalDate ldIso = LocalDate.parse(trimmed);
+			this.predDatumIsporuke = ldIso;
+		} catch (Exception ignored) {
+			this.predDatumIsporuke = null;
+		}
+	}
+   
+    
+    
     @Override
     public String toString() {
         return "Podaci{" +
@@ -175,6 +224,7 @@ public class Podaci {
                 ", startTime=" + startTime +
                 ", endTime=" + endTime +
                 ", duration=" + duration +
+                "planDatumIsporuke='" + getPredPlanIsporukeString() + '\'' +
                 ", trgovackiPredstavnik='" + trgovackiPredstavnik + '\'' +
                 '}';
     }

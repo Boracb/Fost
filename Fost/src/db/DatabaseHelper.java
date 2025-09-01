@@ -30,6 +30,18 @@ public class DatabaseHelper {
      * - Kreira tablicu 'komitenti' ako ne postoji.
      * - Ako tablica postoji, osigurava da potrebni stupci postoje (ALTER TABLE ADD COLUMN ako nedostaje).
      */
+    
+    // gdje ide ova metoda?
+    // pozvati je pri pokretanju aplikacije, npr. u main metodi glavne klase
+    //dalje?
+    // pozvati je prije prvog poziva loadFromDatabase ili saveToDatabase
+    // npr. u konstruktoru GUI klase ili glavne klase aplikacije
+    // primjer:
+    // public class MainApp {
+    //     public static void main(String[] args) {
+    //         DatabaseHelper.initializeDatabase();
+    //         // ostatak pokretanja aplikacije...
+    
     public static void initializeDatabase() {
         try (Connection conn = DriverManager.getConnection(DB_URL)) {
             conn.setAutoCommit(false);
@@ -41,7 +53,7 @@ public class DatabaseHelper {
                  ResultSet rs = ps.executeQuery()) {
                 tableExists = rs.next();
             }
-
+         
             if (!tableExists) {
                 try (Statement stmt = conn.createStatement()) {
                     String sql = "CREATE TABLE narudzbe (" +
@@ -375,155 +387,176 @@ public class DatabaseHelper {
      */
  // Ubaci/zalijepi ovu metodu u klasu db.DatabaseHelper (zamijeni postojeću getAverageDailyM2)
  // Zamijeni postojeću getAverageDailyM2(int) u db/DatabaseHelper.java ovom metodom
-    public static double getAverageDailyM2(int days) {
-        if (days <= 0) days = 30;
-        LocalDate today = LocalDate.now();
-        LocalDate from = today.minusDays(days - 1); // include today
 
-        double totalM2 = 0.0;
+public static double getAverageDailyM2(int days) {
+    if (days <= 0) days = 30;
+    LocalDate today = LocalDate.now();
+    LocalDate from = today.minusDays(days - 1); // include today
 
-        // 1) Try: sum m2 of completed orders (status = 'Izrađeno') where endTime parses into last N days
-        try (Connection conn = DriverManager.getConnection(DB_URL);
-             PreparedStatement ps = conn.prepareStatement(
-                     "SELECT m2, endTime, datumNarudzbe FROM narudzbe WHERE m2 IS NOT NULL")) {
+    double totalM2 = 0.0;
 
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    double m2 = rs.getDouble("m2");
-                    if (rs.wasNull()) continue;
+    // 1) Primary: sum m2 of completed orders (status = 'Izrađeno') where endTime parses into last N days
+    try (Connection conn = DriverManager.getConnection(DB_URL);
+         PreparedStatement ps = conn.prepareStatement(
+                 "SELECT m2, endTime, datumNarudzbe, status FROM narudzbe WHERE m2 IS NOT NULL")) {
 
-                    String endTs = rs.getString("endTime");
-                    String ordDate = rs.getString("datumNarudzbe");
+        try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                double m2 = rs.getDouble("m2");
+                if (rs.wasNull()) continue;
 
-                    LocalDateTime parsedEnd = null;
-                    LocalDate parsedOrd = null;
+                String endTs = rs.getString("endTime");
+                String ordDate = rs.getString("datumNarudzbe");
+                String status = rs.getString("status");
 
-                    // try parse endTime with DateUtils (robust)
-                    if (endTs != null && !endTs.isBlank()) {
-                        try {
-                            parsedEnd = DateUtils.parse(endTs);
-                        } catch (Exception ignored) {
-                            parsedEnd = null;
-                        }
-                    }
+                if (status == null || !status.equalsIgnoreCase("Izrađeno")) continue;
 
-                    // try parse datumNarudzbe if endTime not available
-                    if (ordDate != null && !ordDate.isBlank()) {
-                        try {
-                            LocalDateTime dt = DateUtils.parse(ordDate);
-                            if (dt != null) parsedOrd = dt.toLocalDate();
-                        } catch (Exception ignored) {
-                            parsedOrd = null;
-                        }
-                    }
+                LocalDateTime parsedEnd = null;
+                LocalDate parsedOrd = null;
 
-                    boolean inRange = false;
-                    if (parsedEnd != null) {
-                        LocalDate ld = parsedEnd.toLocalDate();
-                        if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
-                    } else if (parsedOrd != null) {
-                        LocalDate ld = parsedOrd;
-                        if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
-                    }
-
-                    if (inRange) {
-                        totalM2 += m2;
+                if (endTs != null && !endTs.isBlank()) {
+                    try {
+                        parsedEnd = DateUtils.parse(endTs);
+                    } catch (Exception ignored) {
+                        parsedEnd = null;
                     }
                 }
-            }
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-        }
 
-        // Count working days in interval (exclude weekends/holidays)
-        int workDays = 0;
-        for (LocalDate d = from; !d.isAfter(today); d = d.plusDays(1)) {
-            if (!WorkingTimeCalculator.isHolidayOrWeekend(d)) workDays++;
-        }
-
-        double avg = 0.0;
-        if (totalM2 > 0 && workDays > 0) {
-            avg = totalM2 / (double) workDays;
-            System.out.println("getAverageDailyM2: days=" + days
-                    + ", from=" + from + ", to=" + today
-                    + ", totalM2=" + totalM2
-                    + ", workDays=" + workDays
-                    + ", avgDailyM2=" + avg + "  (primary)");
-            return avg;
-        }
-
-        // If we didn't find completed m2 in period, try alternative strategies
-
-        // Strategy A: sum all m2 where datumNarudzbe in range (ignore status)
-        double totalM2ByOrderDate = 0.0;
-        try (Connection conn = DriverManager.getConnection(DB_URL);
-             PreparedStatement ps = conn.prepareStatement("SELECT m2, datumNarudzbe FROM narudzbe WHERE m2 IS NOT NULL")) {
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    double m2 = rs.getDouble("m2");
-                    String ordDate = rs.getString("datumNarudzbe");
-                    if (ordDate == null || ordDate.isBlank()) continue;
+                if (ordDate != null && !ordDate.isBlank()) {
                     try {
                         LocalDateTime dt = DateUtils.parse(ordDate);
-                        if (dt == null) continue;
-                        LocalDate ld = dt.toLocalDate();
-                        if (!ld.isBefore(from) && !ld.isAfter(today)) totalM2ByOrderDate += m2;
-                    } catch (Exception ignored) {}
+                        if (dt != null) parsedOrd = dt.toLocalDate();
+                    } catch (Exception ignored) {
+                        parsedOrd = null;
+                    }
+                }
+
+                boolean inRange = false;
+                if (parsedEnd != null) {
+                    LocalDate ld = parsedEnd.toLocalDate();
+                    if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
+                } else if (parsedOrd != null) {
+                    LocalDate ld = parsedOrd;
+                    if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
+                }
+
+                if (inRange) {
+                    totalM2 += m2;
                 }
             }
-        } catch (SQLException ex) {
-            ex.printStackTrace();
         }
-
-        if (totalM2ByOrderDate > 0 && workDays > 0) {
-            avg = totalM2ByOrderDate / (double) workDays;
-            System.out.println("getAverageDailyM2: fallback by datumNarudzbe: totalM2=" + totalM2ByOrderDate
-                    + ", workDays=" + workDays + ", avgDailyM2=" + avg);
-            return avg;
-        }
-
-        // Strategy B: sum all m2 in last N calendar days (ignore date fields) and divide by days (calendar)
-        double totalM2Calendar = 0.0;
-        try (Connection conn = DriverManager.getConnection(DB_URL);
-             PreparedStatement ps = conn.prepareStatement("SELECT m2, endTime, datumNarudzbe FROM narudzbe WHERE m2 IS NOT NULL")) {
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    double m2 = rs.getDouble("m2");
-                    String endTs = rs.getString("endTime");
-                    String ordDate = rs.getString("datumNarudzbe");
-                    LocalDateTime parsedEnd = null;
-                    LocalDate parsedOrd = null;
-                    if (endTs != null && !endTs.isBlank()) {
-                        try { parsedEnd = DateUtils.parse(endTs); } catch (Exception ignored) { parsedEnd = null; }
-                    }
-                    if (ordDate != null && !ordDate.isBlank()) {
-                        try { LocalDateTime dt = DateUtils.parse(ordDate); if (dt != null) parsedOrd = dt.toLocalDate(); } catch (Exception ignored) { parsedOrd = null; }
-                    }
-                    boolean inRange = false;
-                    if (parsedEnd != null) {
-                        LocalDate ld = parsedEnd.toLocalDate();
-                        if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
-                    } else if (parsedOrd != null) {
-                        LocalDate ld = parsedOrd;
-                        if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
-                    }
-                    if (inRange) totalM2Calendar += m2;
-                }
-            }
-        } catch (SQLException ex) {
-            ex.printStackTrace();
-        }
-
-        if (totalM2Calendar > 0) {
-            avg = totalM2Calendar / (double) days; // calendar days
-            System.out.println("getAverageDailyM2: fallback calendar-sum last " + days + " days: totalM2=" + totalM2Calendar
-                    + ", avgDailyCalendar=" + avg);
-            return avg;
-        }
-
-        // Final fallback: use configured default (m2 per hour * work hours per day)
-        double fallback = FALLBACK_M2_PER_HOUR * WORK_HOURS_PER_DAY;
-        System.out.println("getAverageDailyM2: no data found for last " + days + " days, using fallback=" + fallback);
-        return fallback;
+    } catch (SQLException ex) {
+        ex.printStackTrace();
     }
+
+    // Count working days in interval (exclude weekends/holidays)
+    int workDays = 0;
+    for (LocalDate d = from; !d.isAfter(today); d = d.plusDays(1)) {
+        if (!WorkingTimeCalculator.isHolidayOrWeekend(d)) workDays++;
+    }
+
+    double avg = 0.0;
+    if (totalM2 > 0 && workDays > 0) {
+        avg = totalM2 / (double) workDays;
+        System.out.println("getAverageDailyM2: days=" + days
+                + ", from=" + from + ", to=" + today
+                + ", totalM2=" + totalM2
+                + ", workDays=" + workDays
+                + ", avgDailyM2=" + avg + "  (primary)");
+        return avg;
+    }
+
+    // Strategy A: sum all m2 where datumNarudzbe in range (ignore status)
+    double totalM2ByOrderDate = 0.0;
+    try (Connection conn = DriverManager.getConnection(DB_URL);
+         PreparedStatement ps = conn.prepareStatement("SELECT m2, datumNarudzbe FROM narudzbe WHERE m2 IS NOT NULL")) {
+        try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                double m2 = rs.getDouble("m2");
+                String ordDate = rs.getString("datumNarudzbe");
+                if (ordDate == null || ordDate.isBlank()) continue;
+                try {
+                    LocalDateTime dt = DateUtils.parse(ordDate);
+                    if (dt == null) continue;
+                    LocalDate ld = dt.toLocalDate();
+                    if (!ld.isBefore(from) && !ld.isAfter(today)) totalM2ByOrderDate += m2;
+                } catch (Exception ignored) {}
+            }
+        }
+    } catch (SQLException ex) {
+        ex.printStackTrace();
+    }
+
+    if (totalM2ByOrderDate > 0 && workDays > 0) {
+        avg = totalM2ByOrderDate / (double) workDays;
+        System.out.println("getAverageDailyM2: fallback by datumNarudzbe: totalM2=" + totalM2ByOrderDate
+                + ", workDays=" + workDays + ", avgDailyM2=" + avg);
+        return avg;
+    }
+
+    // Strategy B: sum all m2 in last N calendar days (ignore date fields) and divide by days (calendar)
+    double totalM2Calendar = 0.0;
+    try (Connection conn = DriverManager.getConnection(DB_URL);
+         PreparedStatement ps = conn.prepareStatement("SELECT m2, endTime, datumNarudzbe FROM narudzbe WHERE m2 IS NOT NULL")) {
+        try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                double m2 = rs.getDouble("m2");
+                String endTs = rs.getString("endTime");
+                String ordDate = rs.getString("datumNarudzbe");
+                LocalDateTime parsedEnd = null;
+                LocalDate parsedOrd = null;
+                if (endTs != null && !endTs.isBlank()) {
+                    try { parsedEnd = DateUtils.parse(endTs); } catch (Exception ignored) { parsedEnd = null; }
+                }
+                if (ordDate != null && !ordDate.isBlank()) {
+                    try { LocalDateTime dt = DateUtils.parse(ordDate); if (dt != null) parsedOrd = dt.toLocalDate(); } catch (Exception ignored) { parsedOrd = null; }
+                }
+                boolean inRange = false;
+                if (parsedEnd != null) {
+                    LocalDate ld = parsedEnd.toLocalDate();
+                    if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
+                } else if (parsedOrd != null) {
+                    LocalDate ld = parsedOrd;
+                    if (!ld.isBefore(from) && !ld.isAfter(today)) inRange = true;
+                }
+                if (inRange) totalM2Calendar += m2;
+            }
+        }
+    } catch (SQLException ex) {
+        ex.printStackTrace();
+    }
+
+    if (totalM2Calendar > 0) {
+        avg = totalM2Calendar / (double) days; // calendar days
+        System.out.println("getAverageDailyM2: fallback calendar-sum last " + days + " days: totalM2=" + totalM2Calendar
+                + ", avgDailyCalendar=" + avg);
+        return avg;
+    }
+
+    // Final fallback: use configured default (m2 per hour * work hours per day)
+    double fallback = FALLBACK_M2_PER_HOUR * WORK_HOURS_PER_DAY;
+    System.out.println("getAverageDailyM2: no data found for last " + days + " days, using fallback=" + fallback);
+    return fallback;
+}
+// pokaži mi polja u bazu kako se zovu i koji su im tipovi i brojevi po redoslijedu	
+// Polja u tablici 'narudzbe':
+// datumNarudzbe TEXT 1
+// predDatumIsporuke TEXT 2
+// komitentOpis TEXT 3
+// nazivRobe TEXT 4
+// netoVrijednost REAL 5
+// kom INTEGER 6
+// status TEXT 7
+// djelatnik TEXT 8
+// mm REAL 9
+// m REAL 10
+// tisucl REAL 11
+// m2 REAL 12
+// startTime TEXT 13
+// endTime TEXT 14
+// duration TEXT 15
+// predPlanIsporuke TEXT 16
+// trgovackiPredstavnik TEXT 17
+
+
 }

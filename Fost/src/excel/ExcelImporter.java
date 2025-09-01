@@ -36,7 +36,8 @@ public class ExcelImporter {
     private static final LocalTime PLAN_WORK_START = LocalTime.of(7, 0);
     private static final LocalTime PLAN_WORK_END = LocalTime.of(15, 0);
     private static final double DEFAULT_M2_PER_HOUR = 10.0;
-
+    //novo polje za uvesti kolonu iz excela predPlanIsporuke u formatu dd/MM/yyyy u model iako se racuna uvozom 
+    private static final DateTimeFormatter IN_DATE_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
     public static void importFromExcel(DefaultTableModel model) {
         importFromExcel(model, null);
     }
@@ -123,13 +124,13 @@ public class ExcelImporter {
                             data[5] = komInt;
 
                             data[6] = hasHeader ? getByHeader(row, headerMap, "status", 6) : getCellString(row, 6);
-                            data[7] = hasHeader ? getByHeader(row, headerMap, "djelatnik", 7) : getCellString(row, 7);
+                            data[8] = hasHeader ? getByHeader(row, headerMap, "djelatnik", 8) : getCellString(row, 7);
 
                             // mm/m/tisucl/m2
-                            Double mm = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "mm", 8) : null;
-                            Double mVal = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "m", 9) : null;
-                            Double tisucl = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "tisucl", 10) : null;
-                            Double m2 = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "m2", 11) : null;
+                            Double mm = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "mm", 9) : null;
+                            Double mVal = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "m", 10) : null;
+                            Double tisucl = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "tisucl", 11) : null;
+                            Double m2 = hasHeader ? safeDoubleFromRowByHeader(row, headerMap, "m2", 12) : null;
 
                             // fallback parse from nazivRobe if needed
                             if ((mm == null || mVal == null) && nazivRobe != null) {
@@ -199,7 +200,18 @@ public class ExcelImporter {
                             // trgovacki predstavnik
                             String tp = hasHeader ? getByHeader(row, headerMap, "trgovackipredstavnik", 16) : getCellString(row, 15);
                             data[16] = tp == null ? "" : tp;
-
+                            // novo polje predPlanIsporuke iz excela ako postoji
+							if (hasHeader && headerMap.containsKey("predplanisporuke")) {
+								String pp = getByHeader(row, headerMap, "predplanisporuke", -1);
+								if (pp != null && !pp.isBlank()) {
+									try {
+										LocalDate ld = LocalDate.parse(pp, IN_DATE_FMT);
+										data[15] = ld.format(OUT_DATE_FMT);
+									} catch (Exception ex) {
+										// ignore parse errors, keep calculated predPlan
+									}
+								}
+							}
                             // publish the completed row so it appears immediately in JTable via process()
                             publish(data);
                             imported++;
@@ -424,4 +436,36 @@ public class ExcelImporter {
     private static Double round(double v, int p) {
         return BigDecimal.valueOf(v).setScale(p, java.math.RoundingMode.HALF_UP).doubleValue();
     }
+    
+    // ispiši mi imena kolona iz excela i njihove indekse i brojeve redova
+	public static void printExcelHeaders(File putFilePath) {
+		if (putFilePath == null || !putFilePath.exists()) {
+			System.out.println("File does not exist.");
+			return;
+		}
+		try (FileInputStream fis = new FileInputStream(putFilePath); Workbook wb = new XSSFWorkbook(fis)) {
+			Sheet sheet = wb.getSheetAt(0);
+			if (sheet == null) {
+				System.out.println("No sheets found in the workbook.");
+				return;
+			}
+			int lastRow = sheet.getLastRowNum();
+			for (int r = 0; r <= lastRow; r++) {
+				Row row = sheet.getRow(r);
+				if (row == null)
+					continue;
+				System.out.print("Row " + (r + 1) + ": ");
+				for (int c = 0; c < row.getLastCellNum(); c++) {
+					Cell cell = row.getCell(c);
+					String cellValue = cell == null ? "" : cell.toString().trim();
+					System.out.print("[" + c + "]='" + cellValue + "' ");
+				}
+				System.out.println();
+			}
+		} catch (IOException ex) {
+			System.out.println("Error reading Excel file: " + ex.getMessage());
+		} catch (Exception ex) {
+			System.out.println("Unexpected error: " + ex.getMessage());
+		}
+	}
 }

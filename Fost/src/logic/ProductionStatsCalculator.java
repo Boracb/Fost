@@ -37,6 +37,8 @@ public class ProductionStatsCalculator {
      * @param m2PoSatu kapacitet u m2 po satu (m²/h) - koristi se kao fallback dnevnog kapaciteta (m2PoSatu * radniSatiPoDanu)
      * @return map sa ključevima definiranima iznad
      */
+    // napraviti metodu koja vraća procijenjeni datum dovršetka na osnovi trenutnog stanja i kapaciteta m2PoSatu 
+      // koristi calculate metodu iznad, uzima radniDaniPreostalo i računa datum na osnovi radnih dana od danas pa vraća taj datum 
     public static Map<String, Object> calculate(DefaultTableModel model, double m2PoSatu) {
         if (m2PoSatu <= 0) throw new IllegalArgumentException("Kapacitet m²/h > 0");
 
@@ -129,6 +131,77 @@ public class ProductionStatsCalculator {
         }
         return total;
     }
+    
+  // ovdje meoda za izračun radnih dana između dva datuma (uključivo oba datuma ako su radni dani)
+   
+	public static int countWorkingDaysBetween(LocalDate start, LocalDate end) {
+		if (start == null || end == null || end.isBefore(start))
+			return 0;
+		int workingDays = 0;
+		LocalDate date = start;
+		while (!date.isAfter(end)) {
+			if (isWorkingDay(date))
+				workingDays++;
+			date = date.plusDays(1);
+		}
+		return workingDays;
+	}
+	
+	//medoda za izračun kalendarskih dana između dva datuma (uključivo oba datuma)
+	public static int countCalendarDaysBetween(LocalDate start, LocalDate end) {
+		if (start == null || end == null || end.isBefore(start))
+			return 0;
+		return (int) (end.toEpochDay() - start.toEpochDay()) + 1;
+	}
+	
+	//metoda koja vraća true ako je danas radni dan
+	public static boolean isTodayWorkingDay() {
+		return isWorkingDay(LocalDate.now());
+	}
+	
+	//metoda za izračun broja radnih dana u tekućem mjesecu
+	public static int countWorkingDaysInCurrentMonth() {
+		LocalDate today = LocalDate.now();
+		LocalDate firstDay = today.withDayOfMonth(1);
+		LocalDate lastDay = today.withDayOfMonth(today.lengthOfMonth());
+		return countWorkingDaysBetween(firstDay, lastDay);
+	}
+	
+	//metoda za izračun predPlaniranog datuma isporuke na osnovi radnih dana od danas
+	public static LocalDate calculatePlannedDeliveryDate(int workingDaysFromToday) {
+		if (workingDaysFromToday <= 0)
+			return LocalDate.now();
+		LocalDate today = LocalDate.now();
+		int totalDays = 0;
+		int workingDaysCounted = 0;
+		while (workingDaysCounted < workingDaysFromToday) {
+			totalDays++;
+			LocalDate date = today.plusDays(totalDays);
+			if (isWorkingDay(date))
+				workingDaysCounted++;
+		}
+		return today.plusDays(totalDays);
+	}
+	
+	//metoda koja upisuje datum u String formatu dd.MM.yyyy ili prazan string ako je null u polje planiraniDatumIsporuke 
+	//na bazi izračuna ukupno za izraditi m2 (isključuje status izrađeno) / dnevni kapacitet po danu m2 i daje koliko dana je potrebno od danas za izraditi jedan artikal 
+	// sa naznakom da samo jedan red može napraviti najviše 2800 m2 dnevno, ako je više od toga predviđeni datum isporuke je idući radni dan, također treba uzeti u obzir da planDatumIsporuke
+	// ne može biti subota, nedjelja ili praznik tako da se u tom slučaju pomiče na idući radni dan. uzima podatke iz baze i računa datum na osnovi radnih dana od danas pa vraća taj datum u String formatu dd.MM.yyyy//
+	// ako je m2PoSatu <=0 vraća prazan string 
+	public static String calculateAndFormatPlannedDeliveryDate(DefaultTableModel model, double m2PoSatu) {
+		if (m2PoSatu <= 0)
+			return "";
+		Map<String, Object> stats = calculate(model, m2PoSatu);
+		Object rdObj = stats.get(RADNI_DANI_PREOSTALO);
+		double rd = (rdObj instanceof Number) ? ((Number) rdObj).doubleValue() : 0.0;
+		if (rd <= 0)
+			return LocalDate.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+		LocalDate plannedDate = dateAfterWorkingDays(rd);
+		return plannedDate.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+	}
+    
+	
+	
     private static double toDouble(Object val) { return (val instanceof Number) ? ((Number) val).doubleValue() : 0; }
     private static LocalDate toDate(Object val) {
         if (val == null) return null;

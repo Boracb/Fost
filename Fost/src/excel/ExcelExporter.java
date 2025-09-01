@@ -37,12 +37,18 @@ public class ExcelExporter {
      * - Automatski prilagođava širinu stupaca.
      */
     
+    //isto tako napraviti za export u exccel dodati kolone koje nedostaju
+    // Kolona 7: djelatnik (tekst)
+    // Kolone 12 i 13: startTime / endTime (datum+vrijeme)
+    // Kolona 14: duration (tekst)
+    // Kolona 15: planDatumIsporuke (tekst)
+    
     // Indeksi posebnih kolona (0-based)
     public static void exportTableToExcel(TableModel model) {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Spremi Excel datoteku");
         chooser.setFileFilter(new FileNameExtensionFilter("Excel Workbook (*.xlsx)", "xlsx"));
-
+ 
         if (chooser.showSaveDialog(null) != JFileChooser.APPROVE_OPTION) {
             return; // korisnik odustao
         }
@@ -51,7 +57,7 @@ public class ExcelExporter {
         if (!file.getName().toLowerCase().endsWith(".xlsx")) {
             file = new File(file.getParentFile(), file.getName() + ".xlsx");
         }
-
+ 
         try (Workbook wb = new XSSFWorkbook();
              FileOutputStream fos = new FileOutputStream(file)) {
 
@@ -114,6 +120,12 @@ public class ExcelExporter {
                         cell.setCellValue(value != null ? value.toString() : "");
                         continue;
                     }
+                    // Kolona 15:   → text 
+                    if (c == 15) {
+                        cell.setCellValue(value != null ? value.toString() : "");
+                        continue;
+                    }
+
 
                     // Ostale kolone — automatsko prepoznavanje tipa
                     if (value instanceof Number) {
