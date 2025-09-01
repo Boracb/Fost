@@ -18,12 +18,15 @@ import java.awt.*;
 import java.awt.event.*;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.TemporalAccessor;
+import java.time.temporal.TemporalQueries;
 import java.util.*;
 import java.util.regex.*;
 
@@ -192,6 +195,7 @@ public class UI {
         komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
         UserDatabaseHelper.loadUserTableSettings(prijavljeniKorisnik, table);
         DatabaseHelper.loadFromDatabase(tableModel);
+        debugPrintTableModelInfo();
 
         // GORNJI PANEL (Pretraga + Odjava)
         JPanel topPanel = new JPanel(new BorderLayout());
@@ -379,6 +383,7 @@ public class UI {
         
         DatabaseHelper.loadFromDatabase(tableModel);
         System.out.println("Rows loaded: " + tableModel.getRowCount());
+        debugPrintTableModelInfo();
         computePlanDatumIsporukeForAllRows();
         tableModel.fireTableDataChanged();
         table.repaint();
@@ -1567,64 +1572,569 @@ public class UI {
     
     //metoda koja izračunava plan datum isporuke za sve redove na temelju datuma narudžbe izostavlja status "Izrađeno"  
     // sa naznakom da kreće od prvog reda i dodaje datume u kolonu planDatumIsporuke i produžuje za već datum koji je naznačen u
-   // polju "daniZaIsporuku" jedan raed ili jedan artikal maksimalno 2800 m2
+   // polju "daniZaIsporuku" jedan raed ili jedan artikal maksimalno 2800 m2, znači uzima prosjek m2 kapacitet po danu sum m2 sve šta ima status izrađeno i dijeli 
+// sa ukupnim m2 koje je za ozraditi odnosno koji nema status izrađeno. kapacitet se uzima iz baze naši da se zbroji sve što je m2 status izrađeno u posljednjih 30 dana
+    
+    
+    
 
-// Java
+ // Computes planned delivery dates for all rows, skipping "Izrađeno".
+ // - Earliest date per row = datumNarudzbe + daniZaIsporuku (default 7 if column missing/blank).
+ // - Schedules rows sequentially (model order) across days.
+ // - Daily total capacity = average m2 completed over last 30 calendar days (from model/DB).
+ // - Per-article-per-day cap = 2800 m2 (one article cannot exceed 2800 m2 in a single day).
+ //   If article's m2 > 2800, it spans multiple days. The planned date becomes the last day needed.
+ // - Writes into "planDatumIsporuke" if it exists, otherwise falls back to "predDatumIsporuke".
+ // - Dates formatted as "dd.MM.yyyy".
+ // Replace or add these methods in UI.java (next to your other recompute helpers).
+ // Robust computePlanDatumIsporukeForAllRows() that handles Date/LocalDate/String values,
+ // writes into planDatumIsporuke (fallback predDatumIsporuke) and logs useful diagnostics.
+ // Replacement: compute with a minimum daily capacity fallback and detailed logging of updated rows.
+ // Novi computePlanDatumIsporukeForAllRows() s dodatnom dijagnostikom i fallback upisom
+ // Replace or add the following methods inside your UI class (UI.java).
+ // computePlanDatumIsporukeForAllRows ensures EDT, updates model values, fires per-row updates and scrolls to first updated row.
 
-// Java
+ // Add these methods to your UI class (replace previous computePlanDatumIsporukeForAllRows and helpers).
+ // This version:
+ // - Uses a strict historical average: sum(m2 of "Izrađeno") in the last 30 WORKING days / 30
+ // - Scheduling starts from TODAY and never schedules on weekends or specified non-working days
+ // - One-article-per-day cap = 2800 m2
+ // - No arbitrary minimum fallback for avgDailyCapacity (but if avg==0 we log and fall back to per-article cap to avoid infinite loop)
+ // - Ensures EDT, fireTableRowsUpdated per updated row, and scrolls to the first updated visible row
+ //
+ // IMPORTANT: populate nonWorkingDaysSet with company holidays if needed (format LocalDate).
+ // By default only weekends are considered non-working.
+ private final java.util.Set<java.time.LocalDate> nonWorkingDaysSet = new java.util.HashSet<>(); // populate with holidays as needed
 
- // Java
+//Replace computePlanDatumIsporukeForAllRows with this implementation (and include the helper methods below).
+//This implementation fills each working day up to avgDailyCapacity; per-article cap applies but remaining capacity can be used by other articles.
 
- // Java
+
+
+//computePlanDatumIsporukeForAllRows - day-fill algorithm with sorted queue by earliest,
+//strict historical avg over last N working days, skip weekends and holidays,
+//per-article cap + shared daily capacity behaviour fixed.
+
+
+//import logic.WorkingTimeCalculator;  // dodaj na vrh datoteke ako nije već importano
+
+//computePlanDatumIsporukeForAllRows - fill each working day up to avgDailyCapacity before moving to next day.
+//Uses WorkingTimeCalculator for holidays/weekends. If allowStartBeforeEarliest==true the scheduler may
+//start orders before their earliest if needed to fill the day (set to false to forbid).
+//import logic.WorkingTimeCalculator; // dodaj na vrh klase ako nije importano
+
+//computePlanDatumIsporukeForAllRows - ista logika kao prethodno, ali dodan DIAG ispisi queue preview (prvih 30)
  private void computePlanDatumIsporukeForAllRows() {
-     System.out.println("Computing Plan Datum Isporuke for all rows...");
-     int idxOrderDate = tableModel.findColumn("datumNarudzbe");
+	    // Ensure on EDT
+	    if (!javax.swing.SwingUtilities.isEventDispatchThread()) {
+	        javax.swing.SwingUtilities.invokeLater(() -> computePlanDatumIsporukeForAllRows());
+	        return;
+	    }
+
+	    System.out.println("Computing Plan Datum Isporuke (day-fill, per-article cap enforced, debug queue preview)...");
+
+	    int idxOrderDate = tableModel.findColumn("datumNarudzbe");
+	    int idxStatus = tableModel.findColumn("status");
+	    int idxM2 = tableModel.findColumn("m2");
+	    int idxDaniZaIsporuku = tableModel.findColumn("daniZaIsporuke");
+	    int idxPlanDatumIsporuke = tableModel.findColumn("planDatumIsporuke");
+	    int idxPred = tableModel.findColumn("predDatumIsporuke");
+
+	    if (idxPlanDatumIsporuke < 0) idxPlanDatumIsporuke = idxPred; // fallback
+
+	    if (idxOrderDate < 0 || idxStatus < 0 || idxM2 < 0 || idxPlanDatumIsporuke < 0) {
+	        System.out.printf("Cannot compute: missing columns order=%d status=%d m2=%d plan/fallback=%d%n",
+	                idxOrderDate, idxStatus, idxM2, idxPlanDatumIsporuke);
+	        return;
+	    }
+
+	    final int windowWorkingDays = 30;
+	    final double perArticleDailyCap = 2800.0;
+
+	    // Strict historical average
+	    double avgDailyCapacity = computeAverageDailyCapacityM2_LastNWorkingDays(windowWorkingDays);
+
+	    // >>> FORCED DAILY CAPACITY: change this to your target (e.g. 4424.01 or 4600.0).
+	    // If forcedDailyCapacity <= 0, code will use historical avgDailyCapacity.
+	    final double forcedDailyCapacity = 4424.01; // <- set desired daily throughput here
+
+	    if (avgDailyCapacity <= 0.0) {
+	        System.out.printf("Warning: historical avgDailyCapacity=%.2f (<=0).%n", avgDailyCapacity);
+	    }
+	    if (forcedDailyCapacity > 0.0) {
+	        System.out.printf("DIAG: Overriding avgDailyCapacity %.2f -> forcedDailyCapacity %.2f m2/day%n",
+	                avgDailyCapacity, forcedDailyCapacity);
+	        avgDailyCapacity = forcedDailyCapacity;
+	    } else {
+	        System.out.printf("DIAG: Using historical avgDailyCapacity (last %d working days) = %.2f m2; perArticleCap = %.0f m2%n",
+	                windowWorkingDays, avgDailyCapacity, perArticleDailyCap);
+	    }
+
+	    final java.time.format.DateTimeFormatter outFmt = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+	    final java.time.format.DateTimeFormatter[] parseFmts = new java.time.format.DateTimeFormatter[]{
+	            java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+	            java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+	            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+	    };
+
+	    int totalRows = tableModel.getRowCount();
+	    java.time.LocalDate today = java.time.LocalDate.now();
+
+	    // Build queue: row, remaining m2, earliest (normalized), assignedToday
+	    class Order {
+	        final int row;
+	        double remaining;
+	        java.time.LocalDate earliest;
+	        double assignedToday;
+	        Order(int row, double remaining, java.time.LocalDate earliest) {
+	            this.row = row; this.remaining = remaining; this.earliest = earliest; this.assignedToday = 0.0;
+	        }
+	    }
+	    java.util.List<Order> queue = new java.util.ArrayList<>();
+	    double totalRemaining = 0.0;
+
+	    for (int r = 0; r < totalRows; r++) {
+	        String status = safeString(tableModel.getValueAt(r, idxStatus));
+	        if ("izrađeno".equalsIgnoreCase(status) || "izradjeno".equalsIgnoreCase(status)) continue;
+
+	        Object orderObj = tableModel.getValueAt(r, idxOrderDate);
+	        java.time.LocalDate orderDate = parseLocalDateGeneric(orderObj);
+	        if (orderDate == null) orderDate = parseLocalDate(safeString(orderObj), parseFmts);
+	        if (orderDate == null) {
+	            tableModel.setValueAt("", r, idxPlanDatumIsporuke);
+	            continue;
+	        }
+
+	        int daniZaIsporuku = 7;
+	        if (idxDaniZaIsporuku >= 0) {
+	            daniZaIsporuku = parseIntOrDefault(tableModel.getValueAt(r, idxPlanDatumIsporuke), 7);
+	            if (daniZaIsporuku < 0) daniZaIsporuku = 0;
+	        }
+
+	        java.time.LocalDate earliest = orderDate.plusDays(daniZaIsporuku);
+	        double m2 = parseDoubleOrZero(tableModel.getValueAt(r, idxM2));
+	        if (m2 <= 0.0) {
+	            // set trivial plan on next working day >= earliest or today
+	            java.time.LocalDate candidate = earliest.isBefore(today) ? today : earliest;
+	            java.time.LocalDate plan = nextWorkingDay(candidate);
+	            tableModel.setValueAt(plan.format(outFmt), r, idxPlanDatumIsporuke);
+	            continue;
+	        }
+
+	        // normalize earliest: if in past, make it today (eligible immediately)
+	        if (earliest.isBefore(today)) earliest = today;
+
+	        queue.add(new Order(r, m2, earliest));
+	        totalRemaining += m2;
+	    }
+
+	    if (queue.isEmpty()) {
+	        tableModel.fireTableDataChanged();
+	        System.out.println("DIAG: No orders to schedule.");
+	        return;
+	    }
+
+	    // Sort queue by earliest then by row (stable)
+	    queue.sort((a, b) -> {
+	        int c = a.earliest.compareTo(b.earliest);
+	        if (c != 0) return c;
+	        return Integer.compare(a.row, b.row);
+	    });
+
+	    // DIAG: preview first 30 queue items to spot bad earliest/parsing
+	    System.out.println("DIAG: Queue preview (first 30 items):");
+	    int preview = Math.min(queue.size(), 30);
+	    for (int i = 0; i < preview; i++) {
+	        Order o = queue.get(i);
+	        System.out.printf("DIAG: [%d] row=%d remaining=%.2f earliest=%s%n", i, o.row, o.remaining, o.earliest.format(outFmt));
+	    }
+	    if (queue.size() > preview) System.out.printf("DIAG: ... (+%d more)%n", queue.size() - preview);
+	    System.out.printf("DIAG: totalRemaining=%.2f m2%n", totalRemaining);
+
+	    // Diagnostics
+	    java.time.LocalDate minEarliest = null, maxEarliest = null;
+	    for (Order o : queue) {
+	        if (minEarliest == null || o.earliest.isBefore(minEarliest)) minEarliest = o.earliest;
+	        if (maxEarliest == null || o.earliest.isAfter(maxEarliest)) maxEarliest = o.earliest;
+	    }
+	    double estimatedDays = totalRemaining / avgDailyCapacity;
+	    java.time.LocalDate expectedLast = addWorkingDays(today, Math.max(0, (int)Math.ceil(estimatedDays) - 1));
+	    System.out.printf("DIAG: queueSize=%d totalRemaining=%.2f estimatedDays=%.2f earliestRange=[%s..%s] expectedLast=%s%n",
+	            queue.size(), totalRemaining, estimatedDays,
+	            (minEarliest==null ? "<none>" : minEarliest.format(outFmt)),
+	            (maxEarliest==null ? "<none>" : maxEarliest.format(outFmt)),
+	            (expectedLast==null ? "<none>" : expectedLast.format(outFmt)));
+
+	    // Scheduler policy: allow using orders even if earliest > currentDay to fill the day.
+	    boolean allowStartBeforeEarliest = true;
+
+	    // Scheduling loop: for each working day, keep assigning until day's capacity is (nearly) exhausted.
+	    java.util.List<Integer> updatedRows = new java.util.ArrayList<>();
+	    boolean[] planSet = new boolean[totalRows];
+	    int remainingOrders = 0;
+	    for (Order o : queue) if (o.remaining > 0) remainingOrders++;
+
+	    java.time.LocalDate currentDay = nextWorkingDay(today);
+	    int daysUsed = 0;
+	    int safetyDaysLeft = 365 * 5; // safety guard
+	    final double EPS = 1e-6;
+
+	    while (remainingOrders > 0 && safetyDaysLeft-- > 0) {
+	        // ensure currentDay is working
+	        if (!isWorkingDay(currentDay)) { currentDay = nextWorkingDay(currentDay.plusDays(1)); continue; }
+
+	        // reset per-article assignedToday at start of this day
+	        for (Order o : queue) o.assignedToday = 0.0;
+
+	        // dayRemaining starts as avgDailyCapacity
+	        double dayRemaining = avgDailyCapacity;
+	        boolean anyAssignedThisDay = false;
+
+	        // Try to fill the day completely: loop until dayRemaining ~ 0 or we can't assign anything more this day
+	        while (dayRemaining > EPS) {
+	            // find next order to assign:
+	            // prefer orders with earliest <= currentDay (eligible) in queue order and that still have per-day capacity
+	            Order pick = null;
+	            for (Order o : queue) {
+	                if (o.remaining > EPS && !currentDay.isBefore(o.earliest) && (o.assignedToday + EPS) < perArticleDailyCap) {
+	                    pick = o;
+	                    break;
+	                }
+	            }
+	            // if none eligible and policy allows, pick next available order regardless of earliest, but only if it still has per-day capacity
+	            if (pick == null && allowStartBeforeEarliest) {
+	                for (Order o : queue) {
+	                    if (o.remaining > EPS && (o.assignedToday + EPS) < perArticleDailyCap) {
+	                        pick = o;
+	                        break;
+	                    }
+	                }
+	            }
+	            // if still none, break (no assignable orders left today)
+	            if (pick == null) break;
+
+	            // compute how much this article can still get this day
+	            double canForArticle = Math.max(0.0, perArticleDailyCap - pick.assignedToday);
+	            double assign = Math.min(pick.remaining, Math.min(canForArticle, dayRemaining));
+	            if (assign <= EPS) break;
+
+	            // assign
+	            pick.remaining -= assign;
+	            pick.assignedToday += assign;
+	            dayRemaining -= assign;
+	            anyAssignedThisDay = true;
+
+	            // if finished, set plan to currentDay
+	            if (pick.remaining <= EPS) {
+	                tableModel.setValueAt(currentDay.format(outFmt), pick.row, idxPlanDatumIsporuke);
+	                planSet[pick.row] = true;
+	                updatedRows.add(pick.row);
+	                remainingOrders--;
+	            }
+	            // else residual remains for next days
+	        } // end filling day
+
+	        if (anyAssignedThisDay) daysUsed++;
+
+	        // If we couldn't assign anything this day, jump to next earliest remaining order's earliest (if any)
+	        if (!anyAssignedThisDay) {
+	            java.time.LocalDate nextEarliest = null;
+	            for (Order o : queue) {
+	                if (o.remaining > EPS) {
+	                    if (nextEarliest == null || o.earliest.isBefore(nextEarliest)) nextEarliest = o.earliest;
+	                }
+	            }
+	            if (nextEarliest == null) break; // nothing left
+	            currentDay = nextWorkingDay(nextEarliest);
+	        } else {
+	            // move to next working day
+	            currentDay = nextWorkingDay(currentDay.plusDays(1));
+	        }
+	    } // end scheduling loop
+
+	    // Fallback: any remaining orders -> set to next working day >= earliest or today
+	    int fallbackAssigned = 0;
+	    for (Order o : queue) {
+	        if (planSet[o.row]) continue;
+	        if (o.remaining <= EPS) continue;
+	        java.time.LocalDate candidate = o.earliest.isBefore(today) ? today : o.earliest;
+	        java.time.LocalDate plan = nextWorkingDay(candidate);
+	        tableModel.setValueAt(plan.format(outFmt), o.row, idxPlanDatumIsporuke);
+	        fallbackAssigned++;
+	        updatedRows.add(o.row);
+	    }
+
+	    // Fire updates for changed rows
+	    for (int rr : updatedRows) {
+	        try { tableModel.fireTableRowsUpdated(rr, rr); } catch (Exception ignored) {}
+	    }
+	    table.repaint();
+
+	    // determine last scheduled date (max over all plan dates we wrote)
+	    java.time.LocalDate lastScheduled = null;
+	    for (int r : updatedRows) {
+	        String s = safeString(tableModel.getValueAt(r, idxPlanDatumIsporuke));
+	        java.time.LocalDate d = parseLocalDateGeneric(s);
+	        if (d == null) d = parseLocalDate(s, parseFmts);
+	        if (d != null) {
+	            if (lastScheduled == null || d.isAfter(lastScheduled)) lastScheduled = d;
+	        }
+	    }
+
+	    System.out.printf("DIAG: Scheduling complete: queueSize=%d scheduled=%d fallbackAssigned=%d daysUsed=%d lastScheduled=%s%n",
+	            queue.size(), updatedRows.size(), fallbackAssigned, daysUsed, (lastScheduled == null ? "<none>" : lastScheduled.format(outFmt)));
+	}
+
+//--- helper methods using WorkingTimeCalculator (paste these into the same class if not present) ---
+
+private boolean isWorkingDay(java.time.LocalDate day) {
+  if (day == null) return false;
+  // working day = NOT (weekend OR holiday)
+  return !WorkingTimeCalculator.isHolidayOrWeekend(day);
+}
+
+private java.time.LocalDate nextWorkingDay(java.time.LocalDate day) {
+  if (day == null) return null;
+  java.time.LocalDate d = day;
+  while (!isWorkingDay(d)) d = d.plusDays(1);
+  return d;
+}
+
+//Helper: addWorkingDays(start, workDays)
+//Moves forward from 'start' by 'workDays' working days (skips weekends and holidays).
+//If workDays == 0 returns start.
+private java.time.LocalDate addWorkingDays(java.time.LocalDate start, int workDays) {
+  if (start == null) return null;
+  if (workDays <= 0) return start;
+  java.time.LocalDate d = start;
+  int added = 0;
+  int safety = 0;
+  while (added < workDays && safety++ < 365*10) {
+      d = d.plusDays(1);
+      if (isWorkingDay(d)) {
+          added++;
+      }
+  }
+  return d;
+}
+
+//computeAverageDailyCapacityM2_LastNWorkingDays: strict historical average
+private double computeAverageDailyCapacityM2_LastNWorkingDays(int lastN) {
+  int idxStatus = tableModel.findColumn("status");
+  int idxM2 = tableModel.findColumn("m2");
+  int idxEnd = tableModel.findColumn("endTime");
+  int idxPred = tableModel.findColumn("predDatumIsporuke");
+  int idxNar = tableModel.findColumn("datumNarudzbe");
+
+  if (idxStatus < 0 || idxM2 < 0) return 0.0;
+
+  java.time.LocalDate today = java.time.LocalDate.now();
+
+  // find startInclusive by walking back calendar days until we've counted lastN working days
+  int counted = 0;
+  java.time.LocalDate cursor = today;
+  java.time.LocalDate startInclusive = today;
+  while (counted < lastN) {
+      if (isWorkingDay(cursor)) counted++;
+      if (counted >= lastN) { startInclusive = cursor; break; }
+      cursor = cursor.minusDays(1);
+  }
+
+  double total = 0.0;
+  for (int r = 0; r < tableModel.getRowCount(); r++) {
+      String status = safeString(tableModel.getValueAt(r, idxStatus));
+      if (!"izrađeno".equalsIgnoreCase(status) && !"izradjeno".equalsIgnoreCase(status)) continue;
+      double m2 = parseDoubleOrZero(tableModel.getValueAt(r, idxM2));
+      if (m2 <= 0.0) continue;
+      java.time.LocalDate doneDay = null;
+      if (idxEnd >= 0) doneDay = parseLocalDateFromDateTime(safeString(tableModel.getValueAt(r, idxEnd)));
+      if (doneDay == null && idxPred >= 0) doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxPred)),
+              new java.time.format.DateTimeFormatter[]{
+                      java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+              });
+      if (doneDay == null && idxNar >= 0) doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxNar)),
+              new java.time.format.DateTimeFormatter[]{
+                      java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+              });
+      if (doneDay == null) continue;
+      if ((!doneDay.isBefore(startInclusive)) && (!doneDay.isAfter(today))) {
+          total += m2;
+      }
+  }
+  return total / Math.max(1, lastN);
+}
+
+//Helpers: working day checks and parsers
+
+
+private static String safeString(Object o) { return o == null ? "" : o.toString().trim(); }
+private static int parseIntOrDefault(Object o, int def) { if (o == null) return def; try { return (int) Math.round(Double.parseDouble(o.toString().trim().replace(',', '.'))); } catch (Exception e) { return def; } }
+private static double parseDoubleOrZero(Object o) { if (o == null) return 0.0; try { return Double.parseDouble(o.toString().trim().replace(',', '.')); } catch (Exception e) { return 0.0; } }
+private static java.time.LocalDate parseLocalDate(String s, java.time.format.DateTimeFormatter[] fmts) { if (s == null || s.isBlank()) return null; for (java.time.format.DateTimeFormatter f : fmts) try { return java.time.LocalDate.parse(s.trim(), f); } catch (Exception ignored) {} return null; }
+private static java.time.LocalDate parseLocalDateFromDateTime(String s) { if (s == null || s.isBlank()) return null; String t = s.trim(); java.time.format.DateTimeFormatter[] fmts = new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy") }; for (java.time.format.DateTimeFormatter f : fmts) try { java.time.temporal.TemporalAccessor ta = f.parse(t); if (ta.query(java.time.temporal.TemporalQueries.localDate()) != null) return java.time.LocalDate.from(ta); } catch (Exception ignored) {} return parseLocalDate(t, new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd") }); }
+private static java.time.LocalDate parseLocalDateGeneric(Object o) { if (o == null) return null; if (o instanceof java.time.LocalDate) return (java.time.LocalDate) o; if (o instanceof java.sql.Date) return ((java.sql.Date) o).toLocalDate(); if (o instanceof java.util.Date) { java.util.Date d = (java.util.Date) o; return d.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate(); } if (o instanceof Number) { long v = ((Number) o).longValue(); try { return java.time.Instant.ofEpochMilli(v).atZone(java.time.ZoneId.systemDefault()).toLocalDate(); } catch (Exception ignored) {} } String s = o.toString().trim(); if (s.isEmpty()) return null; java.time.format.DateTimeFormatter[] fmts = new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd"), java.time.format.DateTimeFormatter.ISO_LOCAL_DATE }; return parseLocalDate(s, fmts); }
+
+//computeAverageDailyCapacityM2_LastNWorkingDays: strict historical average
+
+
+//Helpers: working day checks + date parsing
+
+
+ // Compute strict historical average: sum(m2 of rows with status "Izrađeno" whose done day is within the lastN working days window) / lastN
+ // lastN is number of working days (e.g., 30). We find the start date by walking back calendar days until we've counted lastN working days.
+
+
+
+
+//Compute strict historical average over lastN WORKING days (walk back calendar days until lastN working days counted,
+//sum m2 for rows with status "Izrađeno" whose done day in [startInclusive .. today], divide by lastN).
+
+
+//Helpers: working day checks and date parsing
+
+
+
+
+
+
+
+
+ 
+
+
+ // Helper: compute average daily capacity m2 from last N days (calendar days).
+ private double computeAverageDailyCapacityM2FromModel(int lastNDays) {
      int idxStatus = tableModel.findColumn("status");
-     int idxDaniZaIsporuku = tableModel.findColumn("daniZaIsporuku");
-     int idxPlanDatumIsporuke = tableModel.findColumn("planDatumIsporuke");
+     int idxM2 = tableModel.findColumn("m2");
+     int idxEnd = tableModel.findColumn("endTime");
+     int idxPred = tableModel.findColumn("predDatumIsporuke");
+     int idxNar = tableModel.findColumn("datumNarudzbe");
 
-     if (idxOrderDate < 0 || idxStatus < 0 || idxPlanDatumIsporuke < 0) return;
+     if (idxStatus < 0 || idxM2 < 0) return 0.0;
 
-     DateTimeFormatter[] fmts = {
-         DateTimeFormatter.ofPattern("dd/MM/yyyy"),
-         DateTimeFormatter.ofPattern("dd.MM.yyyy"),
-         DateTimeFormatter.ofPattern("yyyy-MM-dd"),
-     };
+     LocalDate today = LocalDate.now();
+     LocalDate start = today.minusDays(Math.max(1, lastNDays) - 1);
 
+     double total = 0.0;
      for (int r = 0; r < tableModel.getRowCount(); r++) {
-         Object statusObj = tableModel.getValueAt(r, idxStatus);
-         String status = statusObj == null ? "" : statusObj.toString().trim();
-         if ("Izrađeno".equals(status)) continue;
+         String status = safeString(tableModel.getValueAt(r, idxStatus));
+         if (!"izrađeno".equalsIgnoreCase(status) && !"izradjeno".equalsIgnoreCase(status)) continue;
 
-         Object orderDateObj = tableModel.getValueAt(r, idxOrderDate);
-         String orderDateStr = orderDateObj == null ? "" : orderDateObj.toString().trim();
-         LocalDate orderDate = null;
-         for (DateTimeFormatter fmt : fmts) {
-             try {
-                 orderDate = LocalDate.parse(orderDateStr, fmt);
-                 break;
-             } catch (Exception ignored) {}
+         double m2 = parseDoubleOrZero(tableModel.getValueAt(r, idxM2));
+         if (m2 <= 0.0) continue;
+
+         LocalDate doneDay = null;
+         if (idxEnd >= 0) {
+             doneDay = parseLocalDateFromDateTime(safeString(tableModel.getValueAt(r, idxEnd)));
          }
-         int daniZaIsporuku = 7; // default
-         if (idxDaniZaIsporuku >= 0) {
-             Object daniObj = tableModel.getValueAt(r, idxDaniZaIsporuku);
-             try {
-                 if (daniObj != null && !daniObj.toString().isBlank())
-                     daniZaIsporuku = Integer.parseInt(daniObj.toString().trim());
-             } catch (Exception ignored) {}
+         if (doneDay == null && idxPred >= 0) {
+             doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxPred)),
+                     new java.time.format.DateTimeFormatter[] {
+                             java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                     });
          }
-         String planDatumIsporukeValue = "";
-         if (orderDate != null) {
-             LocalDate planDate = orderDate.plusDays(daniZaIsporuku);
-             planDatumIsporukeValue = planDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
+         if (doneDay == null && idxNar >= 0) {
+             doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxNar)),
+                     new java.time.format.DateTimeFormatter[] {
+                             java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                     });
          }
-         tableModel.setValueAt(planDatumIsporukeValue, r, idxPlanDatumIsporuke);
+         if (doneDay == null) continue;
+
+         if (!doneDay.isBefore(start) && !doneDay.isAfter(today)) {
+             total += m2;
+         }
      }
-     tableModel.fireTableDataChanged();
-     System.out.println("Completed computing Plan Datum Isporuke for all rows.");
+
+     return total / Math.max(1, lastNDays);
  }
 
+ // ===== utility helpers =====
 
+
+
+ // showColumn helper: attempt to unhide a model column in the JTable view
+
+ // Helper: compute average daily capacity m2 from last N days (calendar days).
+ // Sums m2 of rows with status "Izrađeno" whose completion date (endTime/predDatumIsporuke/datumNarudzbe) falls in window,
+ // then divides by lastNDays.
+
+
+ // ===== utility helpers =====
+
+
+
+ // Try parse string with provided formatters
+
+ // Parse date/time strings like "dd.MM.yyyy HH:mm" -> return LocalDate part
+
+ // Generic parser: handles LocalDate, java.util.Date, java.sql.Date, String
+
+ // Computes average daily capacity (m2/day) from last N calendar days.
+ // Logic: sum m2 for rows with status "Izrađeno" whose completion date falls within the window,
+ // then divide by N (calendar days). Preferred completion date is endTime (date part),
+ // fallback to predDatumIsporuke, fallback to datumNarudzbe.
+
+
+ // ===== Helpers =====
+
+
+ 
+
+
+ // Parses "dd.MM.yyyy HH:mm" or similar; returns only the date part.
+
+
+//DIJAGNOSTIKA: ispisi zaglavlja modela i mapping na view
+private void debugPrintTableModelInfo() {
+  System.out.println("DEBUG: tableModel rowCount=" + tableModel.getRowCount() + " colCount=" + tableModel.getColumnCount());
+  for (int i = 0; i < tableModel.getColumnCount(); i++) {
+      String name = tableModel.getColumnName(i);
+      int viewIdx = table.convertColumnIndexToView(i); // -1 ako nije u view (skrivena)
+      System.out.printf("  modelIdx=%d name='%s' viewIdx=%d%n", i, name, viewIdx);
+  }
+  // provjeri prvi red (ako ima)
+  if (tableModel.getRowCount() > 0) {
+      int idxPlan = tableModel.findColumn("planDatumIsporuke");
+      int idxPred = tableModel.findColumn("predDatumIsporuke");
+      System.out.println(" sample row0 plan=" + (idxPlan>=0 ? tableModel.getValueAt(0, idxPlan) : "<no plan col>") +
+                         " pred=" + (idxPred>=0 ? tableModel.getValueAt(0, idxPred) : "<no pred col>"));
+  }
+}
+
+//Poništi skrivenost kolone (ako je bila hideColumns postavom širine 0)
+private void showColumn(int modelIndex, int preferredWidth) {
+ int viewIndex = table.convertColumnIndexToView(modelIndex);
+ if (viewIndex >= 0) {
+     TableColumn col = table.getColumnModel().getColumn(viewIndex);
+     col.setMinWidth(15);
+     col.setPreferredWidth(preferredWidth);
+     col.setMaxWidth(Integer.MAX_VALUE);
+     col.setResizable(true);
+ } else {
+     // Ponekad može biti -1 ako je model/view neusklađen — pokušaj pronaći po imenu
+     String colName = tableModel.getColumnName(modelIndex);
+     for (int v = 0; v < table.getColumnModel().getColumnCount(); v++) {
+         if (table.getColumnModel().getColumn(v).getHeaderValue().toString().equals(colName)) {
+             TableColumn col = table.getColumnModel().getColumn(v);
+             col.setMinWidth(15);
+             col.setPreferredWidth(preferredWidth);
+             col.setMaxWidth(Integer.MAX_VALUE);
+             col.setResizable(true);
+             return;
+         }
+     }
+     System.out.println("showColumn: view index -1 and not found by header: " + colName);
+ }
+}
 
     // --- Kraj klase ---
 }

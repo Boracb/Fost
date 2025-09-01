@@ -254,4 +254,6 @@ public class WorkingTimeCalculator {
         Set<LocalDate> hol = getHolidaysForYear(d.getYear());
         return hol.contains(d);
     }
+    
+    
 }
