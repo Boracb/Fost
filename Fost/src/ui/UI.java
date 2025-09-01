@@ -1661,14 +1661,9 @@ public class UI {
 	    if (avgDailyCapacity <= 0.0) {
 	        System.out.printf("Warning: historical avgDailyCapacity=%.2f (<=0).%n", avgDailyCapacity);
 	    }
-	    if (forcedDailyCapacity > 0.0) {
-	        System.out.printf("DIAG: Overriding avgDailyCapacity %.2f -> forcedDailyCapacity %.2f m2/day%n",
-	                avgDailyCapacity, forcedDailyCapacity);
-	        avgDailyCapacity = forcedDailyCapacity;
-	    } else {
-	        System.out.printf("DIAG: Using historical avgDailyCapacity (last %d working days) = %.2f m2; perArticleCap = %.0f m2%n",
-	                windowWorkingDays, avgDailyCapacity, perArticleDailyCap);
-	    }
+	    System.out.printf("DIAG: Overriding avgDailyCapacity %.2f -> forcedDailyCapacity %.2f m2/day%n",
+		        avgDailyCapacity, forcedDailyCapacity);
+		avgDailyCapacity = forcedDailyCapacity;
 
 	    final java.time.format.DateTimeFormatter outFmt = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
 	    final java.time.format.DateTimeFormatter[] parseFmts = new java.time.format.DateTimeFormatter[]{
@@ -1995,15 +1990,6 @@ private static java.time.LocalDate parseLocalDateGeneric(Object o) { if (o == nu
 
 
 //Helpers: working day checks and date parsing
-
-
-
-
-
-
-
-
- 
 
 
  // Helper: compute average daily capacity m2 from last N days (calendar days).

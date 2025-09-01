@@ -1,15 +1,15 @@
 package logic;
 
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableModel;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
  * Kalkulator proizvodnih statistika.
- * Računa ukupno, izrađeno i za izraditi, te dane potrebne za dovršetak.
+ * Sada podržava TableModel i automatsko pronalaženje stupaca po nazivima zaglavlja.
  */
 public class ProductionStatsCalculator {
 
@@ -30,60 +30,95 @@ public class ProductionStatsCalculator {
 
     public static final String PROSJEK_M2_PO_DANU = "prosjekM2PoDanu";
 
+    // očekivani default/fallback indeksi (0-based)
+    private static final int FALLBACK_PRED_DATUM = 1;
+    private static final int FALLBACK_NETO = 4;
+    private static final int FALLBACK_KOM = 5;
+    private static final int FALLBACK_STATUS = 6;
+    private static final int FALLBACK_M2 = 11;
+    private static final int FALLBACK_ENDTIME = 13;
+
     /**
-     * Calculate statistics from the table model.
-     * @param model table model with expected columns:
-     *              1 = predDatumIsporuke (fallback), 4 = neto, 5 = kom, 11 = m2, 6 = status, 13 = endTime
-     * @param m2PoSatu kapacitet u m2 po satu (m²/h) - koristi se kao fallback dnevnog kapaciteta (m2PoSatu * radniSatiPoDanu)
-     * @return map sa ključevima definiranima iznad
+     * Backward-compatible: original metoda koja prima DefaultTableModel.
      */
-    // napraviti metodu koja vraća procijenjeni datum dovršetka na osnovi trenutnog stanja i kapaciteta m2PoSatu 
-      // koristi calculate metodu iznad, uzima radniDaniPreostalo i računa datum na osnovi radnih dana od danas pa vraća taj datum 
     public static Map<String, Object> calculate(DefaultTableModel model, double m2PoSatu) {
-        if (m2PoSatu <= 0) throw new IllegalArgumentException("Kapacitet m²/h > 0");
+        return calculate((TableModel) model, m2PoSatu);
+    }
+
+    /**
+     * Nova metoda: prima TableModel, traži stupce po zaglavlju ili koristi fallback indekse.
+     */
+    public static Map<String, Object> calculate(TableModel model, double m2PoSatu) {
+        if (m2PoSatu <= 0) throw new IllegalArgumentException("Kapacitet m²/h mora biti > 0");
+
+        // pronađi kolone prema imenima (normaliziraj nazive)
+        int idxPredDatum = findColumnIndex(model,
+                "preddatumisporuke","plandatumisporuke","planDatumIsporuke","planisporuke","preddatum","datumisporuke","plan");
+        int idxNeto = findColumnIndex(model, "neto","net");
+        int idxKom = findColumnIndex(model, "kom","kolicina","kolicina_kom","kolicina_komada","kolicina_kom.","komada","qty","quantity");
+        int idxStatus = findColumnIndex(model, "status","stanje");
+        int idxM2 = findColumnIndex(model, "m2","m^2","m²","površina","povrsina"," površina");
+        int idxEndTime = findColumnIndex(model, "endtime","end_time","end time","end","vrijemezavrsetka","vrijeme_zavrsetka","završetak","zavrsetak","zavrseno");
+
+        // ako koji nije pronađen, postavi fallback indekse (stari kod očekuje te indekse)
+        if (idxPredDatum == -1) idxPredDatum = FALLBACK_PRED_DATUM;
+        if (idxNeto == -1) idxNeto = FALLBACK_NETO;
+        if (idxKom == -1) idxKom = FALLBACK_KOM;
+        if (idxStatus == -1) idxStatus = FALLBACK_STATUS;
+        if (idxM2 == -1) idxM2 = FALLBACK_M2;
+        if (idxEndTime == -1) idxEndTime = FALLBACK_ENDTIME;
+
+        // cllection for per-day produced m2 when status == finished
+        Map<LocalDate, Double> m2PoDanuIzradjeno = new HashMap<>();
 
         double totalKom = 0, totalM2 = 0, totalNeto = 0;
         double komIzr = 0, m2Izr = 0, netoIzr = 0;
         double komZai = 0, m2Zai = 0, netoZai = 0;
-        Map<LocalDate, Double> m2PoDanuIzradjeno = new HashMap<>();
 
-        for (int r = 0; r < model.getRowCount(); r++) {
-            double kom  = toDouble(model.getValueAt(r, 5));
-            double m2   = toDouble(model.getValueAt(r, 11));
-            double neto = toDouble(model.getValueAt(r, 4));
-            String status = (model.getValueAt(r, 6) == null) ? "" : model.getValueAt(r, 6).toString();
+        int rows = model.getRowCount();
+        for (int r = 0; r < rows; r++) {
+            double kom = safeToDouble(getModelValue(model, r, idxKom));
+            double m2 = safeToDouble(getModelValue(model, r, idxM2));
+            double neto = safeToDouble(getModelValue(model, r, idxNeto));
+            Object statusObj = getModelValue(model, r, idxStatus);
+            String status = statusObj == null ? "" : statusObj.toString().trim().toLowerCase(Locale.ROOT);
 
-            totalKom  += kom; totalM2 += m2; totalNeto += neto;
-            String statusNorm = status.trim().toLowerCase(Locale.ROOT);
+            totalKom += kom; totalM2 += m2; totalNeto += neto;
 
-            if (statusNorm.equals("izrađeno") || statusNorm.equals("izradeno")) {
+            if (status.equals("izrađeno") || status.equals("izradeno") || status.equals("završeno") || status.equals("finished")) {
                 komIzr += kom; m2Izr += m2; netoIzr += neto;
-                // KORIŠTENJE endTime kolone (13). Ako nije parsabilno, koristimo predDatumIsporuke (1) kao fallback.
-                LocalDate datum = toDate(model.getValueAt(r, 13));
-                if (datum == null) datum = toDate(model.getValueAt(r, 1));
-                if (datum != null) m2PoDanuIzradjeno.merge(datum, m2, Double::sum);
-            } else if (statusNorm.equals("u izradi") || statusNorm.isEmpty()) {
-                komZai += kom; m2Zai += m2; netoZai += neto;
+                // uzmi datum iz endTime, fallback na predDatum
+                LocalDate datum = toDate(getModelValue(model, r, idxEndTime));
+                if (datum == null) datum = toDate(getModelValue(model, r, idxPredDatum));
+                if (datum != null && m2 > 0) {
+                    m2PoDanuIzradjeno.merge(datum, m2, Double::sum);
+                }
             } else {
-                // treat unknown statuses as "za izraditi" (conservative)
+                // tretiraj kao za izraditi
                 komZai += kom; m2Zai += m2; netoZai += neto;
             }
         }
 
-        Map<String, Object> result = new HashMap<>();
-        result.put(KOM, totalKom);  result.put(M2, totalM2);  result.put(NETO, totalNeto);
-        result.put(KOM_IZR, komIzr); result.put(M2_IZR, m2Izr); result.put(NETO_IZR, netoIzr);
-        result.put(KOM_ZAI, komZai); result.put(M2_ZAI, m2Zai); result.put(NETO_ZAI, netoZai);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put(KOM, totalKom);
+        result.put(M2, totalM2);
+        result.put(NETO, totalNeto);
 
-        // Ako imamo povijesne dane, prosjek je stvarni prosjek (m2 po različitim danima kada je nešto završeno).
-        // Inače koristimo procjenu kapaciteta: m2PoSatu * radniSatiPoDanu (ovdje fiksno 8h za smjenu 07:00-15:00).
+        result.put(KOM_IZR, komIzr);
+        result.put(M2_IZR, m2Izr);
+        result.put(NETO_IZR, netoIzr);
+
+        result.put(KOM_ZAI, komZai);
+        result.put(M2_ZAI, m2Zai);
+        result.put(NETO_ZAI, netoZai);
+
+        // prosjek m2 po danu (ako imamo povijesnih dana koristi stvarni prosjek, inače fallback)
         final double radniSatiPoDanu = 8.0;
         double fallbackDaily = m2PoSatu * radniSatiPoDanu;
         double prosjek = m2PoDanuIzradjeno.isEmpty() ? fallbackDaily : (m2Izr / m2PoDanuIzradjeno.size());
         result.put(PROSJEK_M2_PO_DANU, prosjek);
 
         if (prosjek > 0) {
-            // radni dani preostalo (može biti decimalni broj, zaokružujemo na 2 decimale kao ranije)
             double rd = Math.ceil((m2Zai / prosjek) * 100) / 100.0;
             double kd = Math.ceil(countCalendarDaysFromToday(rd) * 100) / 100.0;
             result.put(RADNI_DANI_PREOSTALO, rd);
@@ -92,26 +127,115 @@ public class ProductionStatsCalculator {
             result.put(RADNI_DANI_PREOSTALO, 0.0);
             result.put(KAL_DANI_PREOSTALO, 0.0);
         }
+
         return result;
     }
 
-    /**
-     * Procijeni datum dovršetka (kalendarski datum) na osnovi trenutnog stanja modela i kapaciteta m²/h.
-     * Vraća LocalDate koji predstavlja zadnji dan potrebnih radnih dana (uključujući i današnje ako se broji).
-     * Ako nema preostalog posla vraća danasnji datum.
-     */
-    public static LocalDate estimateCompletionDate(DefaultTableModel model, double m2PoSatu) {
-        Map<String, Object> stats = calculate(model, m2PoSatu);
-        Object rdObj = stats.get(RADNI_DANI_PREOSTALO);
-        double rd = (rdObj instanceof Number) ? ((Number) rdObj).doubleValue() : 0.0;
-        if (rd <= 0) return LocalDate.now();
-        return dateAfterWorkingDays(rd);
+    // --- helper: pronađi index stupca prema listi mogućih naziva (normalizira)
+    private static int findColumnIndex(TableModel model, String... possibleNames) {
+        if (model == null) return -1;
+        int cols = model.getColumnCount();
+        for (int c = 0; c < cols; c++) {
+            String colName;
+            try {
+                Object cn = model.getColumnName(c);
+                colName = cn == null ? "" : cn.toString();
+            } catch (Exception ex) {
+                colName = "";
+            }
+            String norm = normalize(colName);
+            for (String p : possibleNames) {
+                if (norm.contains(normalize(p))) return c;
+            }
+        }
+        return -1;
     }
 
-    /**
-     * Vraća datum koji je nakon potrebnog broja radnih dana (wd može biti decimalni).
-     * Računa minimalan broj kalendarskih dana potrebnih da se pređe wd radnih dana i vraća taj datum.
-     */
+    // normalize helper: lower-case, remove non-alphanumeric
+    private static String normalize(String s) {
+        if (s == null) return "";
+        return s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9đčćšžμ²^]+", "");
+    }
+
+    // get value safely (returns null if index out of bounds)
+    private static Object getModelValue(TableModel model, int row, int col) {
+        if (model == null) return null;
+        if (row < 0 || row >= model.getRowCount()) return null;
+        if (col < 0 || col >= model.getColumnCount()) return null;
+        try {
+            return model.getValueAt(row, col);
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    // safe numeric parsing (handles strings with commas and dots)
+    private static double safeToDouble(Object val) {
+        if (val == null) return 0;
+        if (val instanceof Number) return ((Number) val).doubleValue();
+        String s = val.toString().trim();
+        if (s.isEmpty()) return 0;
+        // replace non-digit except comma/dot and minus
+        s = s.replaceAll("\\s+", "");
+        // If both dot and comma present, assume dot is thousands and comma is decimal (e.g. "1.234,56")
+        int dots = countChar(s, '.');
+        int commas = countChar(s, ',');
+        if (dots > 0 && commas > 0) {
+            // remove dots, replace comma with dot
+            s = s.replace(".", "").replace(",", ".");
+        } else if (commas > 0 && dots == 0) {
+            // replace comma with dot
+            s = s.replace(",", ".");
+        } else {
+            // keep as is
+        }
+        try {
+            return Double.parseDouble(s);
+        } catch (Exception ex) {
+            return 0;
+        }
+    }
+    private static int countChar(String s, char ch) {
+        int cnt = 0;
+        for (char c : s.toCharArray()) if (c == ch) cnt++;
+        return cnt;
+    }
+
+    // parsing LocalDate from common formats
+    private static LocalDate toDate(Object val) {
+        if (val == null) return null;
+        if (val instanceof LocalDate) return (LocalDate) val;
+        String s = val.toString().trim();
+        if (s.isEmpty()) return null;
+        DateTimeFormatter[] fmts = {
+                DateTimeFormatter.ofPattern("yyyy-MM-dd"),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy."),
+                DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                DateTimeFormatter.ofPattern("dd/MM/yy"),
+                DateTimeFormatter.ofPattern("d.M.yyyy"),
+                DateTimeFormatter.ofPattern("d.M.yyyy."),
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")
+        };
+        for (DateTimeFormatter fmt : fmts) {
+            try {
+                return LocalDate.parse(s, fmt);
+            } catch (Exception ignored) {}
+        }
+        // final attempt: try to extract yyyy-MM-dd inside string
+        try {
+            int i = s.indexOf("20");
+            if (i >= 0 && s.length() >= i + 10) {
+                String candidate = s.substring(i, i + 10);
+                return LocalDate.parse(candidate, DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    // --- radni/dani helperi (ne mijenjano bitno) ---
     private static LocalDate dateAfterWorkingDays(double wd) {
         if (wd <= 0) return LocalDate.now();
         LocalDate today = LocalDate.now(); int total = 0; double work = 0;
@@ -131,99 +255,64 @@ public class ProductionStatsCalculator {
         }
         return total;
     }
-    
-  // ovdje meoda za izračun radnih dana između dva datuma (uključivo oba datuma ako su radni dani)
-   
-	public static int countWorkingDaysBetween(LocalDate start, LocalDate end) {
-		if (start == null || end == null || end.isBefore(start))
-			return 0;
-		int workingDays = 0;
-		LocalDate date = start;
-		while (!date.isAfter(end)) {
-			if (isWorkingDay(date))
-				workingDays++;
-			date = date.plusDays(1);
-		}
-		return workingDays;
-	}
-	
-	//medoda za izračun kalendarskih dana između dva datuma (uključivo oba datuma)
-	public static int countCalendarDaysBetween(LocalDate start, LocalDate end) {
-		if (start == null || end == null || end.isBefore(start))
-			return 0;
-		return (int) (end.toEpochDay() - start.toEpochDay()) + 1;
-	}
-	
-	//metoda koja vraća true ako je danas radni dan
-	public static boolean isTodayWorkingDay() {
-		return isWorkingDay(LocalDate.now());
-	}
-	
-	//metoda za izračun broja radnih dana u tekućem mjesecu
-	public static int countWorkingDaysInCurrentMonth() {
-		LocalDate today = LocalDate.now();
-		LocalDate firstDay = today.withDayOfMonth(1);
-		LocalDate lastDay = today.withDayOfMonth(today.lengthOfMonth());
-		return countWorkingDaysBetween(firstDay, lastDay);
-	}
-	
-	//metoda za izračun predPlaniranog datuma isporuke na osnovi radnih dana od danas
-	public static LocalDate calculatePlannedDeliveryDate(int workingDaysFromToday) {
-		if (workingDaysFromToday <= 0)
-			return LocalDate.now();
-		LocalDate today = LocalDate.now();
-		int totalDays = 0;
-		int workingDaysCounted = 0;
-		while (workingDaysCounted < workingDaysFromToday) {
-			totalDays++;
-			LocalDate date = today.plusDays(totalDays);
-			if (isWorkingDay(date))
-				workingDaysCounted++;
-		}
-		return today.plusDays(totalDays);
-	}
-	
-	//metoda koja upisuje datum u String formatu dd.MM.yyyy ili prazan string ako je null u polje planiraniDatumIsporuke 
-	//na bazi izračuna ukupno za izraditi m2 (isključuje status izrađeno) / dnevni kapacitet po danu m2 i daje koliko dana je potrebno od danas za izraditi jedan artikal 
-	// sa naznakom da samo jedan red može napraviti najviše 2800 m2 dnevno, ako je više od toga predviđeni datum isporuke je idući radni dan, također treba uzeti u obzir da planDatumIsporuke
-	// ne može biti subota, nedjelja ili praznik tako da se u tom slučaju pomiče na idući radni dan. uzima podatke iz baze i računa datum na osnovi radnih dana od danas pa vraća taj datum u String formatu dd.MM.yyyy//
-	// ako je m2PoSatu <=0 vraća prazan string 
-	public static String calculateAndFormatPlannedDeliveryDate(DefaultTableModel model, double m2PoSatu) {
-		if (m2PoSatu <= 0)
-			return "";
-		Map<String, Object> stats = calculate(model, m2PoSatu);
-		Object rdObj = stats.get(RADNI_DANI_PREOSTALO);
-		double rd = (rdObj instanceof Number) ? ((Number) rdObj).doubleValue() : 0.0;
-		if (rd <= 0)
-			return LocalDate.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
-		LocalDate plannedDate = dateAfterWorkingDays(rd);
-		return plannedDate.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
-	}
-    
-	
-	
-    private static double toDouble(Object val) { return (val instanceof Number) ? ((Number) val).doubleValue() : 0; }
-    private static LocalDate toDate(Object val) {
-        if (val == null) return null;
-        DateTimeFormatter[] fmts = {
-            DateTimeFormatter.ofPattern("yyyy-MM-dd"),
-            DateTimeFormatter.ofPattern("dd.MM.yyyy"),
-            DateTimeFormatter.ofPattern("dd.MM.yyyy."),
-            DateTimeFormatter.ofPattern("dd/MM/yyyy"),
-            DateTimeFormatter.ofPattern("dd/MM/yy"),
-            DateTimeFormatter.ofPattern("d.M.yyyy"),
-            DateTimeFormatter.ofPattern("d.M.yyyy."),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
-            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"),
-            DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss zzz yyyy", Locale.ENGLISH)
-        };
-        try {
-            if (val instanceof LocalDate) return (LocalDate) val;
-            String s = val.toString().trim();
-            for (DateTimeFormatter fmt : fmts) try { return LocalDate.parse(s, fmt); } catch (Exception ignore) {}
-        } catch (Exception ignored) {}
-        return null;
+
+    public static int countWorkingDaysBetween(LocalDate start, LocalDate end) {
+        if (start == null || end == null || end.isBefore(start))
+            return 0;
+        int workingDays = 0;
+        LocalDate date = start;
+        while (!date.isAfter(end)) {
+            if (isWorkingDay(date))
+                workingDays++;
+            date = date.plusDays(1);
+        }
+        return workingDays;
     }
+
+    public static int countCalendarDaysBetween(LocalDate start, LocalDate end) {
+        if (start == null || end == null || end.isBefore(start))
+            return 0;
+        return (int) (end.toEpochDay() - start.toEpochDay()) + 1;
+    }
+
+    public static boolean isTodayWorkingDay() {
+        return isWorkingDay(LocalDate.now());
+    }
+
+    public static int countWorkingDaysInCurrentMonth() {
+        LocalDate today = LocalDate.now();
+        LocalDate firstDay = today.withDayOfMonth(1);
+        LocalDate lastDay = today.withDayOfMonth(today.lengthOfMonth());
+        return countWorkingDaysBetween(firstDay, lastDay);
+    }
+
+    public static LocalDate calculatePlannedDeliveryDate(int workingDaysFromToday) {
+        if (workingDaysFromToday <= 0)
+            return LocalDate.now();
+        LocalDate today = LocalDate.now();
+        int totalDays = 0;
+        int workingDaysCounted = 0;
+        while (workingDaysCounted < workingDaysFromToday) {
+            totalDays++;
+            LocalDate date = today.plusDays(totalDays);
+            if (isWorkingDay(date))
+                workingDaysCounted++;
+        }
+        return today.plusDays(totalDays);
+    }
+
+    public static String calculateAndFormatPlannedDeliveryDate(DefaultTableModel model, double m2PoSatu) {
+        if (m2PoSatu <= 0)
+            return "";
+        Map<String, Object> stats = calculate(model, m2PoSatu);
+        Object rdObj = stats.get(RADNI_DANI_PREOSTALO);
+        double rd = (rdObj instanceof Number) ? ((Number) rdObj).doubleValue() : 0.0;
+        if (rd <= 0)
+            return LocalDate.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+        LocalDate plannedDate = dateAfterWorkingDays(rd);
+        return plannedDate.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+    }
+
     private static boolean isWorkingDay(LocalDate d) {
         Set<LocalDate> holidays = WorkingTimeCalculator.getHolidaysForYear(d.getYear());
         return !(d.getDayOfWeek() == DayOfWeek.SATURDAY || d.getDayOfWeek() == DayOfWeek.SUNDAY || holidays.contains(d));
