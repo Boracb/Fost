@@ -327,6 +327,12 @@ public class UI {
             ExcelImporter.importFromExcel(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Kliknuo UVEZI iz Excela");
         });
+        
+        JButton btnImportSales = new JButton("Uvezi prodaju");
+        btnImportSales.addActionListener(e -> {
+            InventoryTurnoverPlannerFrame.showInventoryTurnoverPlanner();
+            ActionLogger.log(prijavljeniKorisnik, "Otvorio uvoz prodaje");
+        });
         JButton btnExport  = new JButton("Izvezi u Excel");
         btnExport.addActionListener(e -> {
             ExcelExporter.exportTableToExcel(tableModel);
@@ -408,6 +414,7 @@ public class UI {
 
         // Dodavanje svih gumba na donji panel
         bottom.add(btnImport);
+        bottom.add(btnImportSales);
         bottom.add(btnExport);
         bottom.add(btnSaveDb);
         bottom.add(btnLoadDb);
