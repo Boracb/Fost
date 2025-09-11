@@ -29,6 +29,12 @@ import java.time.temporal.TemporalAccessor;
 import java.time.temporal.TemporalQueries;
 import java.util.*;
 import java.util.regex.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
+import java.io.File;
+import excel.ProducedExcelReader; // koristi čitač Excela iz paketa excel
+import model.ProducedExcelRow;    // DTO redaka iz Excela
+import javax.swing.filechooser.FileNameExtensionFilter;
+import java.io.File;
 
 /**
  * Glavna UI klasa aplikacije.
@@ -169,6 +175,12 @@ public class UI {
         for (int i = 0; i < widths.length && i < table.getColumnModel().getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
+        
+        int planViewIdx = table.convertColumnIndexToView(PL_COL);
+        if (planViewIdx >= 0) {
+            table.getColumnModel().getColumn(planViewIdx).setPreferredWidth(140);
+        }
+        
         System.out.println("Rows loaded: " + tableModel.getRowCount());
         for (int r = 0; r < tableModel.getRowCount(); r++) {
             System.out.println("Row " + r + " datumNarudzbe: " + tableModel.getValueAt(r, 0));
@@ -230,6 +242,8 @@ public class UI {
         topPanel.add(searchPanel, BorderLayout.WEST);
         topPanel.add(logoutPanel, BorderLayout.EAST);
         frame.add(topPanel, BorderLayout.NORTH);
+        
+        
 
         // DROPDOWNOVI I RENDERERI
         setUpStatusDropdown();
@@ -255,15 +269,20 @@ public class UI {
         // DONJI PANEL S GUMBIMA
         JPanel bottom = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         JButton btnImport  = new JButton("Uvezi iz Excela");
+        JButton btnMarkProduced = new JButton("Označi IZRAĐENO iz Excela");
+        btnMarkProduced.addActionListener(e -> handleMarkProducedFromExcel());
         btnImport.addActionListener(e -> {
             ExcelImporter.importFromExcel(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Kliknuo UVEZI iz Excela");
         });
+        
+        
         JButton btnExport  = new JButton("Izvezi u Excel");
         btnExport.addActionListener(e -> {
             ExcelExporter.exportTableToExcel(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Kliknuo IZVEZI iz Excel");
         });
+        
 
         JButton btnSaveDb  = new JButton("Spremi u bazu");
         btnSaveDb.addActionListener(e -> {
@@ -368,14 +387,19 @@ public class UI {
             JOptionPane.showMessageDialog(frame, "Uvezeno novih komitenata: " + added);
             ActionLogger.log(prijavljeniKorisnik, "Uvezao komitente iz tablice, dodano: " + added);
         });
+        
+        JButton btnPlanObrtaj = new JButton("Plan nabave (obrtaj)");
+        btnPlanObrtaj.addActionListener(e -> new InventoryTurnoverDialog(frame).setVisible(true));
 
         bottom.add(btnImport);
+        bottom.add(btnMarkProduced);
         bottom.add(btnExport);
         bottom.add(btnSaveDb);
         bottom.add(btnLoadDb);
         bottom.add(btnRefresh);
         bottom.add(btnDelete);
         bottom.add(btnImportKomitenti);
+        bottom.add(btnPlanObrtaj);
 
         applyBrutalButtonStyle(bottom);
 
@@ -637,6 +661,126 @@ public class UI {
             }
         });
     }
+    
+    
+    private void handleMarkProducedFromExcel() {
+        JFileChooser fc = new JFileChooser();
+        fc.setDialogTitle("Odaberi Excel 'proizvedena roba'");
+        fc.setFileFilter(new FileNameExtensionFilter("Excel datoteke (*.xlsx, *.xls)", "xlsx", "xls"));
+        int res = fc.showOpenDialog(frame);
+        if (res != JFileChooser.APPROVE_OPTION) return;
+
+        // Zaustavi editing ako je aktivan
+        if (table.isEditing()) {
+            try { TableCellEditor ed = table.getCellEditor(); if (ed != null) ed.stopCellEditing(); } catch (Exception ignored) {}
+        }
+
+        File f = fc.getSelectedFile();
+        java.util.List<ProducedExcelRow> excelRows;
+        try {
+            excelRows = ProducedExcelReader.read(f);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(frame, "Greška pri čitanju Excela: " + ex.getMessage(), "Greška", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (excelRows == null || excelRows.isEmpty()) {
+            JOptionPane.showMessageDialog(frame, "Excel je prazan ili neprepoznat.", "Obavijest", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        // Mapiranja kolona po nazivu (otpornost na raspored)
+        int idxKomitent = safeFindCol("komitentOpis", 2);
+        int idxNaziv    = safeFindCol("nazivRobe", 3);
+        int idxStatus   = safeFindCol("status", 6);
+
+        if (idxKomitent < 0 || idxNaziv < 0 || idxStatus < 0) {
+            JOptionPane.showMessageDialog(frame,
+                    "Nedostaju kolone u tablici (potrebno: komitentOpis, nazivRobe, status).",
+                    "Greška", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        int marked = 0;
+        int already = 0;
+        int notMatched = 0;
+
+        // Ključ: podudaranje SAMO po komitentOpis + nazivRobe
+        for (ProducedExcelRow r : excelRows) {
+            String kKomitent = normalize(r.getKomitentOpis());
+            String kNaziv    = normalize(r.getNazivRobe());
+
+            // pronađi sve podudarne redove
+            java.util.List<Integer> matches = new java.util.ArrayList<>();
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                String mKomitent = normalize(Objects.toString(tableModel.getValueAt(i, idxKomitent), ""));
+                String mNaziv    = normalize(Objects.toString(tableModel.getValueAt(i, idxNaziv), ""));
+                if (mKomitent.equals(kKomitent) && mNaziv.equals(kNaziv)) {
+                    matches.add(i);
+                }
+            }
+
+            if (matches.isEmpty()) {
+                notMatched++;
+                continue;
+            }
+
+            // pokušaj prvi koji NIJE "Izrađeno"
+            int target = -1;
+            boolean allDone = true;
+            for (int rowIdx : matches) {
+                String mStatus = Objects.toString(tableModel.getValueAt(rowIdx, idxStatus), "");
+                boolean isDone = "Izrađeno".equalsIgnoreCase(mStatus) || "Izradjeno".equalsIgnoreCase(mStatus);
+                if (!isDone) {
+                    target = rowIdx;
+                    allDone = false;
+                    break;
+                }
+            }
+
+            if (target >= 0) {
+                tableModel.setValueAt("Izrađeno", target, idxStatus);
+                if (tableModel instanceof AbstractTableModel atm) atm.fireTableRowsUpdated(target, target);
+                marked++;
+            } else if (allDone) {
+                already++;
+            } else {
+                notMatched++;
+            }
+        }
+
+        // osvježi prikaz
+        table.repaint();
+
+        // SPREMI U BAZU (po tvojoj uputi)
+        try {
+            DatabaseHelper.saveToDatabase(tableModel);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(frame, "Greška pri spremanju u bazu: " + ex.getMessage(), "Greška", JOptionPane.ERROR_MESSAGE);
+        }
+
+        String msg = "Stavki u Excelu: " + excelRows.size()
+                + "\nOznačeno 'Izrađeno': " + marked
+                + "\nVeć su bile 'Izrađeno': " + already
+                + "\nNije pronađeno u tablici: " + notMatched;
+        JOptionPane.showMessageDialog(frame, msg, "Rezultat označavanja", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private int safeFindCol(String name, int fallback) {
+        try {
+            int idx = tableModel.findColumn(name);
+            return idx >= 0 ? idx : fallback;
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+    private static String normalize(String s) { return s == null ? "" : s.trim().toLowerCase(Locale.ROOT); }
+
+ 
+    private static int parseIntOrDefault(Object o, int def) { if (o == null) return def; try { return (int) Math.round(Double.parseDouble(o.toString().trim().replace(',', '.'))); } catch (Exception e) { return def; } }
+    private static double parseDoubleOrZero(Object o) { if (o == null) return 0.0; try { return Double.parseDouble(o.toString().trim().replace(',', '.')); } catch (Exception e) { return 0.0; } }
+    private static boolean monetaryEquals(double a, double b, double eps) { return Math.abs(a - b) <= eps; }
+
+   
 
     /**
      * Parsira vrijednosti mm/m iz naziva robe.
@@ -878,8 +1022,10 @@ public class UI {
      * Postavlja editore i renderere za datumske kolone.
      */
     private void setUpDateColumns() {
-        int[] dateOnlyCols = {0, 1};
-        int[] dateTimeCols = {12, 13};
+        // date-only: datumNarudzbe (0), predDatumIsporuke (1), planDatumIsporuke (PL_COL)
+        int[] dateOnlyCols = {0, 1, PL_COL};
+        // date-time: startTime (12), endTime (13)
+        int[] dateTimeCols = {START_TIME_COL, END_TIME_COL};
 
         for (int c : dateOnlyCols) {
             int v = table.convertColumnIndexToView(c);
@@ -1967,8 +2113,7 @@ private double computeAverageDailyCapacityM2_LastNWorkingDays(int lastN) {
 
 
 private static String safeString(Object o) { return o == null ? "" : o.toString().trim(); }
-private static int parseIntOrDefault(Object o, int def) { if (o == null) return def; try { return (int) Math.round(Double.parseDouble(o.toString().trim().replace(',', '.'))); } catch (Exception e) { return def; } }
-private static double parseDoubleOrZero(Object o) { if (o == null) return 0.0; try { return Double.parseDouble(o.toString().trim().replace(',', '.')); } catch (Exception e) { return 0.0; } }
+
 private static java.time.LocalDate parseLocalDate(String s, java.time.format.DateTimeFormatter[] fmts) { if (s == null || s.isBlank()) return null; for (java.time.format.DateTimeFormatter f : fmts) try { return java.time.LocalDate.parse(s.trim(), f); } catch (Exception ignored) {} return null; }
 private static java.time.LocalDate parseLocalDateFromDateTime(String s) { if (s == null || s.isBlank()) return null; String t = s.trim(); java.time.format.DateTimeFormatter[] fmts = new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy") }; for (java.time.format.DateTimeFormatter f : fmts) try { java.time.temporal.TemporalAccessor ta = f.parse(t); if (ta.query(java.time.temporal.TemporalQueries.localDate()) != null) return java.time.LocalDate.from(ta); } catch (Exception ignored) {} return parseLocalDate(t, new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd") }); }
 private static java.time.LocalDate parseLocalDateGeneric(Object o) { if (o == null) return null; if (o instanceof java.time.LocalDate) return (java.time.LocalDate) o; if (o instanceof java.sql.Date) return ((java.sql.Date) o).toLocalDate(); if (o instanceof java.util.Date) { java.util.Date d = (java.util.Date) o; return d.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate(); } if (o instanceof Number) { long v = ((Number) o).longValue(); try { return java.time.Instant.ofEpochMilli(v).atZone(java.time.ZoneId.systemDefault()).toLocalDate(); } catch (Exception ignored) {} } String s = o.toString().trim(); if (s.isEmpty()) return null; java.time.format.DateTimeFormatter[] fmts = new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd"), java.time.format.DateTimeFormatter.ISO_LOCAL_DATE }; return parseLocalDate(s, fmts); }

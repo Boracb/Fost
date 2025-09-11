@@ -1,10 +1,11 @@
 package ui;
 
+import logic.ProductionStatsCalculator;
+import logic.ProductionStatsCalculator.StartMode;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import logic.ProductionStatsCalculator;
 
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
@@ -18,15 +19,10 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * StatistikaPanel - ispravljena i poboljšana verzija:
- * - radi sigurno s null vrijednostima
- * - model nije editabilan
- * - export u Excel radi s tekstualnim vrijednostima ako nisu brojevi
- * - renderer poravnava vrijednosti i stilizira sekcije
- * - dodane pristupne metode getAvgDailyM2() i getTotalRemainingM2()
- *
- * Dodatak: ako statistika još nije izračunata, ensureStatsAvailable() izračunava je sinkrono
- * kako bi potrošači (npr. computePredPlansBatch) dobili konzistentne vrijednosti bez race-a.
+ * StatistikaPanel - verzija sa starim funkcijama + nove značajke:
+ * - Stara logika (izrađeno se ne uračunava u preostalo) ostaje u calculate(DefaultTableModel, double)
+ * - Novi odabir početka plana (od sada / sutra 07:00) koristi overload s StartMode
+ * - Prikaz planStart/planEnd u tablici
  */
 public class StatistikaPanel extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -34,9 +30,13 @@ public class StatistikaPanel extends JPanel {
     private final JButton btnRefresh = new JButton("🔄 Osvježi statistiku");
     private final JButton btnExport = new JButton("📤 Izvezi u Excel");
 
+    // Odabir početka plana
+    private final JRadioButton rbStartNow = new JRadioButton("Kreni od sada");
+    private final JRadioButton rbStartTomorrow = new JRadioButton("Kreni od sutra 07:00", true);
+
     private final DefaultTableModel sourceModel;
     private double m2PoSatu;
-    // volatile radi sigurnosti između niti (reader iz UI klase može čitati)
+    // volatile radi sigurnosti između niti
     private volatile Map<String, Object> lastStats;
     private JTable statsTable;
     private StatsTableModel statsTableModel;
@@ -63,20 +63,34 @@ public class StatistikaPanel extends JPanel {
         statsTable.setFillsViewportHeight(true);
         statsTable.setDefaultRenderer(Object.class, new StatsTableCellRenderer());
 
-        // Hide table header (we display label column inside rows)
+        // Bez zaglavlja – prikaz se radi u redovima
         statsTable.setTableHeader(null);
 
         add(new JScrollPane(statsTable), BorderLayout.CENTER);
 
-        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 6));
+        // Panel za odabir početka plana
+        JPanel optionsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 6));
+        optionsPanel.add(new JLabel("Plan početak:"));
+        ButtonGroup grp = new ButtonGroup();
+        grp.add(rbStartNow);
+        grp.add(rbStartTomorrow);
+        optionsPanel.add(rbStartNow);
+        optionsPanel.add(rbStartTomorrow);
+
+        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
         btnPanel.add(btnRefresh);
         btnPanel.add(btnExport);
-        add(btnPanel, BorderLayout.SOUTH);
+
+        JPanel south = new JPanel(new BorderLayout());
+        south.add(optionsPanel, BorderLayout.WEST);
+        south.add(btnPanel, BorderLayout.EAST);
+        add(south, BorderLayout.SOUTH);
 
         btnRefresh.addActionListener(e -> updateStatsAsync());
         btnExport.addActionListener(e -> exportToExcel());
+        rbStartNow.addActionListener(e -> updateStatsAsync());
+        rbStartTomorrow.addActionListener(e -> updateStatsAsync());
 
-        // Start async calculation but consumers can also trigger synchronous calculation if necessary
         updateStatsAsync();
     }
 
@@ -112,7 +126,7 @@ public class StatistikaPanel extends JPanel {
             try (Workbook wb = new XSSFWorkbook()) {
                 Sheet sheet = wb.createSheet("Statistika");
                 int row = 0;
-                // deterministički redoslijed -> LinkedHashMap je korišten kod updateStats
+                // deterministički redoslijed – LinkedHashMap na izvoru
                 for (Map.Entry<String, Object> e : snapshot.entrySet()) {
                     Row r = sheet.createRow(row++);
                     r.createCell(0).setCellValue(e.getKey());
@@ -141,7 +155,8 @@ public class StatistikaPanel extends JPanel {
         SwingWorker<Map<String, Object>, Void> worker = new SwingWorker<>() {
             @Override
             protected Map<String, Object> doInBackground() {
-                return ProductionStatsCalculator.calculate(sourceModel, m2PoSatu);
+                StartMode mode = rbStartNow.isSelected() ? StartMode.NOW : StartMode.TOMORROW_7;
+                return ProductionStatsCalculator.calculate(sourceModel, m2PoSatu, mode);
             }
 
             @Override
@@ -149,7 +164,6 @@ public class StatistikaPanel extends JPanel {
                 try {
                     Map<String, Object> stats = get();
                     if (stats == null) stats = Map.of();
-                    // store as LinkedHashMap for deterministic iteration/order
                     lastStats = new LinkedHashMap<>(stats);
                     statsTableModel.updateStats(lastStats);
                 } catch (Exception ex) {
@@ -168,28 +182,20 @@ public class StatistikaPanel extends JPanel {
         worker.execute();
     }
 
-    /**
-     * Ako statistika još nije izračunata, poziva se sinkrono i postavlja lastStats.
-     * Ovo je kratko i determinističko: koristi isti ProductionStatsCalculator koji se inače koristi.
-     * Služi za slučajeve kada pozivatelj (npr. computePredPlansBatch) treba odmah dobiti prosjek.
-     */
+    // Ako statistika još nije izračunata, izračunaj sinkrono (prema trenutnom StartMode-u)
     private synchronized void ensureStatsAvailable() {
         if (lastStats != null) return;
         try {
-            Map<String, Object> stats = ProductionStatsCalculator.calculate(sourceModel, m2PoSatu);
+            StartMode mode = rbStartNow.isSelected() ? StartMode.NOW : StartMode.TOMORROW_7;
+            Map<String, Object> stats = ProductionStatsCalculator.calculate(sourceModel, m2PoSatu, mode);
             if (stats == null) stats = Map.of();
             lastStats = new LinkedHashMap<>(stats);
-            // update UI model on EDT
             SwingUtilities.invokeLater(() -> statsTableModel.updateStats(lastStats));
         } catch (Exception ex) {
             lastStats = Map.of();
         }
     }
 
-    /**
-     * Vrati prosjek m2/dan iz posljednjeg izračuna statistike.
-     * Ako još nije izračunato, izračuna se sinkrono (ensureStatsAvailable).
-     */
     public double getAvgDailyM2() {
         ensureStatsAvailable();
         if (lastStats == null) return 0.0;
@@ -201,10 +207,6 @@ public class StatistikaPanel extends JPanel {
         return 0.0;
     }
 
-    /**
-     * Vrati ukupno preostalo m2 (ZA IZRADITI) iz posljednjeg izračuna.
-     * Ako još nije izračunato, izračuna se sinkrono.
-     */
     public double getTotalRemainingM2() {
         ensureStatsAvailable();
         if (lastStats == null) return 0.0;
@@ -216,8 +218,6 @@ public class StatistikaPanel extends JPanel {
         return 0.0;
     }
 
-    // ===== inner model & renderer =====
-
     private class StatsTableModel extends AbstractTableModel {
         private final String[] columns = {"Opis", "Vrijednost"};
         private Object[][] rows = new Object[0][2];
@@ -225,7 +225,7 @@ public class StatistikaPanel extends JPanel {
         public void updateStats(Map<String, Object> stats) {
             LinkedHashMap<String, Object> data = new LinkedHashMap<>();
 
-            // store raw values into lastStats for export/consumption
+            // snapshot za export
             lastStats = new LinkedHashMap<>(stats);
 
             // 📊 UKUPNO
@@ -252,18 +252,20 @@ public class StatistikaPanel extends JPanel {
             data.put("Kalendarski dani preostalo:", stats.getOrDefault(ProductionStatsCalculator.KAL_DANI_PREOSTALO, 0));
             data.put("Radni dani preostalo:", stats.getOrDefault(ProductionStatsCalculator.RADNI_DANI_PREOSTALO, 0));
 
+            // 🕒 PLAN
+            data.put("🕒 PLAN", null);
+            data.put("Početak plana:", stats.getOrDefault(ProductionStatsCalculator.PLAN_START, "-"));
+            data.put("Procijenjeni završetak:", stats.getOrDefault(ProductionStatsCalculator.PLAN_END, "-"));
+
             rows = new Object[data.size()][2];
             int i = 0;
             for (Map.Entry<String, Object> entry : data.entrySet()) {
                 rows[i][0] = entry.getKey();
                 Object val = entry.getValue();
-                // Format values consistently as strings for display
                 if (val == null) {
                     rows[i][1] = "";
                 } else {
-                    // Decide formatting based on key or numeric
                     if (val instanceof Number) {
-                        // choose 0 or 2 decimals depending on key name (simple heuristic)
                         String key = entry.getKey().toLowerCase(Locale.ROOT);
                         if (key.contains("m2") || key.contains("kapacitet") || key.contains("neto") || key.contains("dani")) {
                             rows[i][1] = fmt2(val);
@@ -276,9 +278,7 @@ public class StatistikaPanel extends JPanel {
                 }
                 i++;
             }
-            SwingUtilities.invokeLater(() -> {
-                fireTableDataChanged();
-            });
+            SwingUtilities.invokeLater(this::fireTableDataChanged);
         }
 
         @Override public int getRowCount() { return rows.length; }
@@ -305,21 +305,18 @@ public class StatistikaPanel extends JPanel {
             String label = labelObj == null ? "" : labelObj.toString();
 
             c.setFont(new Font("Segoe UI", Font.PLAIN, 14));
-            if (label.startsWith("📊") || label.startsWith("✅") || label.startsWith("🛠") || label.startsWith("📅")) {
+            if (label.startsWith("📊") || label.startsWith("✅") || label.startsWith("🛠") || label.startsWith("📅") || label.startsWith("🕒")) {
                 c.setFont(new Font("Segoe UI", Font.BOLD, 15));
                 c.setBackground(sectionBg);
             } else {
                 c.setBackground(normalBg);
             }
 
-            // Align first column left, second column right
             if (column == 0) {
                 setHorizontalAlignment(LEFT);
             } else {
                 setHorizontalAlignment(RIGHT);
             }
-
-            // ensure opaque for background color to show
             if (c instanceof JComponent) ((JComponent) c).setOpaque(true);
 
             return c;
