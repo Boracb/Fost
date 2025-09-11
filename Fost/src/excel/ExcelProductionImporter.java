@@ -67,7 +67,7 @@ public final class ExcelProductionImporter {
                     if (datum == null) continue;
                     if ((isBlank(sifra)) && (isBlank(naziv))) continue;
 
-                    result.add(new SalesRow(datum, nullSafe(sifra), nullSafe(naziv), kolicina));
+                    result.add(new SalesRow(datum, nullSafe(sifra), nullSafe(naziv), naziv, kolicina, kolicina));
                 }
 
                 if (!result.isEmpty()) break;
