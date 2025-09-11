@@ -128,16 +128,9 @@ public final class ExcelSalesImporter {
         int idxDatum = -1, idxNaziv = -1, idxKolicina = -1;
         Integer idxSifra = null;
 
-        // heuristika: pronađi vjerojatni "datum" stupac (≥3 prepoznata datuma)
         idxDatum = findBestDateColumn(sheet, scanRows, maxCol);
-
-        // heuristika: pronađi stupac "količina" (po imenu prvo, inače numeric ratio)
         idxKolicina = findBestQuantityColumn(sheet, scanRows, maxCol);
-
-        // heuristika: pronađi "naziv" (po imenu prvo, inače najduži tekstualni stupac)
         idxNaziv = findBestNameColumn(sheet, scanRows, maxCol);
-
-        // heuristika: šifra (po imenu prvo, inače alfanumerički kodovi)
         idxSifra = findBestCodeColumn(sheet, scanRows, maxCol);
 
         if (idxDatum >= 0 && idxNaziv >= 0 && idxKolicina >= 0) {
@@ -272,30 +265,51 @@ public final class ExcelSalesImporter {
         for (int i = first; i < last; i++) {
             Cell c = header.getCell(i, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
             if (c == null) continue;
-            String raw = c.getCellType() == CellType.STRING
+
+            String raw = (c.getCellType() == CellType.STRING)
                     ? c.getStringCellValue()
                     : NumberToTextConverter.toText(getDouble(c));
             String norm = normalizeHeader(raw);
+            if (norm.isEmpty()) continue;
 
-            String key = switch (norm) {
-                // Datum (razne varijante)
-                case "datum", "dat", "datumdok", "datumdokumenta", "datumknjizenja", "datumizdavanja", "datdok" -> "datum"
+            String key = null;
 
-                // Šifra (opc.)
-                ; case "sifra", "šifra", "sif", "sif.", "sifraartikla", "sifartikla", "sifrarobe", 
+            // Datum
+            if (norm.equals("datum") || norm.equals("dat") || norm.equals("datumdok")
+                    || norm.equals("datumdokumenta") || norm.equals("datumknjizenja")
+                    || norm.equals("datumizdavanja") || norm.equals("datdok")) {
+                key = "datum";
+            }
+            // Količina
+            else if (norm.equals("kolicina") || norm.equals("kol") || norm.equals("kolicinaukupno")
+                    || norm.equals("kolicinaizdano") || norm.equals("kolicinapotroseno")
+                    || norm.contains("kolicin")) {
+                key = "kolicina";
+            }
+            // Naziv (izbjegni komitentopis)
+            else if ((norm.equals("naziv") || norm.equals("nazivrobe") || norm.equals("nazivrobeopis")
+                    || norm.equals("nazivartikla") || norm.equals("nazivproizvoda")
+                    || norm.equals("roba") || norm.equals("artikl") || norm.equals("proizvod")
+                    || norm.equals("stavka"))
+                    && !norm.contains("komitent")) {
+                key = "naziv";
+            }
+            // Šifra (opc.)
+            else if (norm.equals("sifra") || norm.equals("sif") || norm.equals("sifartikla")
+                    || norm.equals("sifraartikla") || norm.equals("sifrarobe")
+                    || norm.equals("sku") || norm.equals("kod") || norm.equals("code")
+                    || norm.equals("itemcode") || norm.equals("productcode")
+                    || norm.equals("barkod") || norm.equals("ean") || norm.equals("ean13")
+                    || norm.equals("plu")) {
+                key = "sifra";
+            }
+            // Uobičajene nebitne glave – ignorirati (npr. tipdok, brdok, pdv, marza...)
+            // else if (norm.equals("tipdok") || norm.equals("brdok") || norm.contains("dok") || ... ) { key = null; }
 
-
-                        "kod", "code", "itemcode", "productcode", "sku", "barkod", "ean", "ean13", "plu" -> "sifra"
-
-                // Naziv (NE mapirati "komitentopis")
-                ; case "nazivrobeopis", "nazivartikla", "naziv", "nazivrobe", "nazivproizvoda", "roba", "artikl", "proizvod", "stavka" -> "naziv"
-
-                // Količina
-                ; case "kolicina", "kol", "kolicinaukupno", "kolicinaizdano", "kolicinapotroseno" 
- -> null;
-			default -> throw new IllegalArgumentException("Unexpected value: " + norm);
-            };
-            if (key != null && !map.containsKey(key)) map.put(key, i);
+            // Ako je prepoznato, zapamti prvi put viđeni indeks
+            if (key != null && !map.containsKey(key)) {
+                map.put(key, i);
+            }
         }
         return map;
     }
