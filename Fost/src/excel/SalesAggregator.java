@@ -12,12 +12,6 @@ import java.util.*;
 public final class SalesAggregator {
     private SalesAggregator() {}
 
-    /**
-     * @param rows           lista redova (prodaja + proizvodnja)
-     * @param from           uključivo
-     * @param to             uključivo
-     * @param groupByCodeOnly true = grupiraj samo po šifri (ako postoji), inače (šifra|naziv)
-     */
     public static java.util.List<AggregatedConsumption> aggregateByItem(
             java.util.List<SalesRow> rows,
             LocalDate from,
@@ -28,7 +22,6 @@ public final class SalesAggregator {
         Map<String, AggregatedConsumption> map = new LinkedHashMap<>();
 
         for (SalesRow r : rows) {
-            // Filter po datumu: ako datum postoji, mora biti u [from..to]. Ako je null, uključujemo.
             LocalDate d = r.getDatum();
             if (d != null && (d.isBefore(from) || d.isAfter(to))) continue;
 
@@ -42,13 +35,15 @@ public final class SalesAggregator {
 
             AggregatedConsumption ac = map.get(key);
             if (ac == null) {
-                // naziv zadržavamo točno kako je došao prvi put
-                String displayName = naziv;
-                String displayCode = sifra;
-                ac = new AggregatedConsumption(displayCode, displayName);
+                ac = new AggregatedConsumption(sifra, naziv);
                 map.put(key, ac);
             }
             ac.add(qty, d);
+        }
+
+        // NEW: postavi fallback prozor (od/do) za sve agregate
+        for (AggregatedConsumption ac : map.values()) {
+            ac.setFallbackWindow(from, to);
         }
 
         return new ArrayList<>(map.values());
