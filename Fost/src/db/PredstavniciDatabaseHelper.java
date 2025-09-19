@@ -1,10 +1,17 @@
 package db;
 
+import model.PredstavnikInfo;
+
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
-//** Helper class for managing 'predstavnici' table in SQLite database. Table schema://
-// - id (INTEGER, PRIMARY KEY, AUTOINCREMENT)
+
+/**
+ * Helper class for managing 'predstavnici' table in SQLite database.
+ * Table schema:
+ * - id INTEGER PRIMARY KEY AUTOINCREMENT
+ * - naziv TEXT UNIQUE NOT NULL
+ */
 public class PredstavniciDatabaseHelper {
 
     private static final String DB_URL = "jdbc:sqlite:fost.db";
@@ -13,12 +20,15 @@ public class PredstavniciDatabaseHelper {
     // SQL konstante
     private static final String SQL_CREATE_TABLE =
             "CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-            "naziv TEXT UNIQUE NOT NULL" +
-            ")";
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "naziv TEXT UNIQUE NOT NULL" +
+                    ")";
 
-    private static final String SQL_SELECT_ALL =
+    private static final String SQL_SELECT_ALL_NAMES =
             "SELECT naziv FROM " + TABLE_NAME + " ORDER BY naziv";
+
+    private static final String SQL_SELECT_ALL_WITH_ID =
+            "SELECT id, naziv FROM " + TABLE_NAME + " ORDER BY naziv";
 
     private static final String SQL_INSERT =
             "INSERT OR IGNORE INTO " + TABLE_NAME + " (naziv) VALUES (?)";
@@ -39,14 +49,31 @@ public class PredstavniciDatabaseHelper {
         }
     }
 
-    /** Dohvaća sve predstavnike sortirane po nazivu */
+    /** Dohvaća sve predstavnike sortirane po nazivu (samo nazivi) */
     public static List<String> loadAllPredstavnici() {
         List<String> lista = new ArrayList<>();
         try (Connection conn = DriverManager.getConnection(DB_URL);
              Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(SQL_SELECT_ALL)) {
+             ResultSet rs = stmt.executeQuery(SQL_SELECT_ALL_NAMES)) {
             while (rs.next()) {
                 lista.add(rs.getString("naziv"));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return lista;
+    }
+
+    /** Dohvaća sve predstavnike s id-evima */
+    public static List<PredstavnikInfo> loadAllWithIds() {
+        List<PredstavnikInfo> lista = new ArrayList<>();
+        try (Connection conn = DriverManager.getConnection(DB_URL);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(SQL_SELECT_ALL_WITH_ID)) {
+            while (rs.next()) {
+                int id = rs.getInt("id");
+                String naziv = rs.getString("naziv");
+                lista.add(new PredstavnikInfo(id, naziv));
             }
         } catch (SQLException e) {
             e.printStackTrace();
