@@ -12,108 +12,85 @@ import excel.ExcelImporter;
 import logic.DateUtils;
 import logic.WorkingTimeCalculator;
 import util.ActionLogger;
-
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.awt.*;
 import java.awt.event.*;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.TemporalAccessor;
+import java.time.temporal.TemporalQueries;
 import java.util.*;
 import java.util.regex.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
+import java.io.File;
+import javax.swing.filechooser.FileNameExtensionFilter;
+import java.io.File;
 
 /**
  * Glavna UI klasa aplikacije.
- * Odgovorna je za:
- * - Kreiranje i prikaz grafičkog sučelja
- * - Upravljanje tablicom i modelom podataka
- * - Obradu korisničkih akcija (event handling)
- * - Rad s bazom podataka i Excel import/export
- * - Evidenciju povijesti promjena i otključavanja ćelija
+ * Spaja stare značajke tvoje klase i nove promjene (robustni recomputeDuration koji koristi
+ * WorkingTimeCalculator.calculateWorkingMinutes, dodatni editori/renderer-i i admin funkcije).
  */
+
+//dodati polje za planDatumIsporuke u tablicu i uvoz iz excela i izvoz u excel 
+
+
 public class UI {
 
     // --- Polja klase ---
-
-    /** Glavni JFrame prozor aplikacije */
     private JFrame frame;
-
-    /** JTable za prikaz i uređivanje podataka */
     private JTable table;
-
-    /** Model podataka povezan s JTable */
-    private DefaultTableModel tableModel;
-
-    /** Trenutno prijavljeni korisnik */
+    private static DefaultTableModel tableModel;
     private String prijavljeniKorisnik;
-
-    /** Uloga prijavljenog korisnika (npr. Administrator ili korisnik) */
     private String ulogaKorisnika;
-
-    /** Timer za praćenje neaktivnosti korisnika */
     private javax.swing.Timer inactivityTimer;
-
-    /** Vrijeme neaktivnosti prije automatske odjave (1 minuta) */
     private final int INACTIVITY_DELAY = 60_000;
-
-    /** Povijest promjena po retku (red -> lista događaja) */
     private java.util.Map<Integer, java.util.List<String>> povijestPromjena = new java.util.HashMap<>();
-
-    /** Set redova koje je administrator ručno odmrznuo */
     private Set<Integer> odmrznutiModelRedovi;
-
-    /** Sorter za sortiranje i filtriranje tablice */
     private TableRowSorter<DefaultTableModel> sorter;
-
-    /** Popis djelatnika za dropdown izbornik */
     private final String[] djelatnici = {"", "Marko", "Ivana", "Petra", "Boris", "Ana"};
-    
     private Map<String, String> komitentTPMap;
 
-
-    /** Nazivi kolona u tablici */
     private final String[] columnNames = {
-    	    "datumNarudzbe","predDatumIsporuke","komitentOpis",
-    	    "nazivRobe","netoVrijednost","kom","status",
-    	    "djelatnik","mm","m","tisucl","m2","startTime","endTime","duration",
-    	    "trgovackiPredstavnik"
-    	};
+            "datumNarudzbe","predDatumIsporuke","komitentOpis",
+            "nazivRobe","netoVrijednost","kom","status",
+            "djelatnik","mm","m","tisucl","m2","startTime","endTime","duration", "planDatumIsporuke",
+            "trgovackiPredstavnik"
+    };
 
+    // Konstante — indeksi temeljeni na modelu
+    private static final int STATUS_COL_MODEL = 6;
+    private static final int START_TIME_COL   = 12;
+    private static final int END_TIME_COL     = 13;
+    private static final int DURATION_COL     = 14;
+    private static final int KOMITENT_OPIS_COL = 2;
+    private static final int TP_COL            = 16;
+    private static final int PL_COL           = 15;
 
-    /**
-     * Konstruktor UI klase.
-     * @param korisnik prijavljeni korisnik
-     * @param uloga uloga korisnika (Administrator / Korisnik)
-     */
+    private JTextField searchField; // polje pretrage
+
+    // Konstruktor
     public UI(String korisnik, String uloga) {
         this.prijavljeniKorisnik = korisnik;
         this.ulogaKorisnika = uloga;
     }
+
     /**
      * Kreira i prikazuje glavni GUI aplikacije.
-     * 
-     * Funkcionalnosti:
-     * - Inicijalizacija podataka i struktura
-     * - Kreiranje glavnog JFrame-a
-     * - Postavljanje tablice i njezinog modela
-     * - Dodavanje panela s kontrolama (pretraga, odjava, gumbi akcija)
-     * - Postavljanje listenera i timera za neaktivnost
-     * - Učitavanje i spremanje korisničkih postavki tablice
      */
-    
-    private static final int KOMITENT_OPIS_COL = 2;
-    private static final int TP_COL            = 15;
-
     void createAndShowGUI() {
-    	// Inicijalizacija podataka
-    	// Inicijalizacija skupa odmrznutih redova
-    	// Inicijalizacija mape komitenta i trgovačkog predstavnika
-    	        odmrznutiModelRedovi = new HashSet<>();
-    	                // Povijest je već inicijalizirana pri deklaraciji
+        odmrznutiModelRedovi = new HashSet<>();
         initUnlockHistoryData();
-// Kreiranje glavnog prozora
-        
+      
+
         frame = new JFrame("Fost – Excel Uvoz i SQLite");
         frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
@@ -129,6 +106,10 @@ public class UI {
                         JOptionPane.YES_NO_CANCEL_OPTION
                 );
                 if (res == JOptionPane.YES_OPTION) {
+                    if (table.isEditing()) {
+                        TableCellEditor ed = table.getCellEditor();
+                        if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+                    }
                     DatabaseHelper.saveToDatabase(tableModel);
                     UserDatabaseHelper.saveUserTableSettings(prijavljeniKorisnik, table);
                     frame.dispose();
@@ -137,7 +118,7 @@ public class UI {
                 }
             }
         });
-// Timer za automatsku odjavu nakon neaktivnosti
+
         inactivityTimer = new javax.swing.Timer(INACTIVITY_DELAY, e -> {
             UserDatabaseHelper.saveUserTableSettings(prijavljeniKorisnik, table);
             frame.dispose();
@@ -147,33 +128,14 @@ public class UI {
         Toolkit.getDefaultToolkit().addAWTEventListener(ev -> resetInactivityTimer(),
                 AWTEvent.MOUSE_EVENT_MASK | AWTEvent.KEY_EVENT_MASK);
         inactivityTimer.start();
-// Kreiranje modela tablice
-        // Definiranje modela tablice s prilagođenim ponašanjem ćelija
-        // Override metode za uređivanje ćelija i tipove podataka
-        // Postavljanje modela na JTable i konfiguracija sortiranja
-        // Postavljanje širina kolona i stilizacija tablice
-        // Dodavanje tabova za podatke i statistiku
-        // Učitavanje podataka iz baze i postavljanje korisničkih postavki
-        // Kreiranje gornjeg panela s pretragom i odjavom
-        // Postavljanje listenera za pretragu
-        // Dodavanje gumba na donji panel s akcijama
-        // Postavljanje dropdown izbornika i renderera za specifične kolone
-        // Postavljanje listenera za model tablice
-        // Postavljanje popup menija za administratore
-        // Sakrivanje određenih kolona
-        // Prikaz glavnog prozora
-        // Inicijalizacija baze podataka i logiranje otvaranja
-        // Povijest je već inicijalizirana pri deklaraciji
-        // Inicijalizacija skupa odmrznutih redova
-   
-        
+
+        // Model tablice
         tableModel = new DefaultTableModel(columnNames, 0) {
             @Override
             public boolean isCellEditable(int modelRow, int modelCol) {
-                if (modelCol == KOMITENT_OPIS_COL) return false; // zabrana tipkanja
+                if (modelCol == KOMITENT_OPIS_COL) return false; // zabrana tipkanja u komitentOpis
 
-                int statusColModel = STATUS_COL_MODEL;
-                Object statusVal = getValueAt(modelRow, statusColModel);
+                Object statusVal = getValueAt(modelRow, STATUS_COL_MODEL);
                 String status = statusVal == null ? "" : statusVal.toString();
                 boolean otkljucanRed = "Administrator".equalsIgnoreCase(ulogaKorisnika)
                         && odmrznutiModelRedovi.contains(modelRow);
@@ -189,7 +151,8 @@ public class UI {
                             || modelCol == END_TIME_COL
                             || modelCol == STATUS_COL_MODEL;
                 }
-                if (modelCol == 14 || modelCol == 15) {
+                // duration & trgovacki predstavnik su neuredivi
+                if (modelCol == DURATION_COL || modelCol == TP_COL || modelCol == PL_COL) {
                     return false;
                 }
                 return true;
@@ -202,41 +165,57 @@ public class UI {
             }
         };
 
-        table = new JTable(tableModel);
+        table = new DoubleClickTable(tableModel);
         sorter = new TableRowSorter<>(tableModel);
         table.setRowSorter(sorter);
-// Postavljanje širina kolona i stilizacija tablice
-        int[] widths = {120,120,180,180,100,60,110,140,60,80,90,100,140,140,140};
-        for (int i = 0; i < widths.length; i++) {
+
+        int[] widths = {120,120,180,180,100,60,110,140,60,80,90,100,140,140,140,140};
+        for (int i = 0; i < widths.length && i < table.getColumnModel().getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
-        // Stilizacija tablice
-        table.getTableHeader().setResizingAllowed(true);
-        applyBrutalTableStyle();
-        // --- TABOVI ---
         
+        int planViewIdx = table.convertColumnIndexToView(PL_COL);
+        if (planViewIdx >= 0) {
+            table.getColumnModel().getColumn(planViewIdx).setPreferredWidth(140);
+        }
+        
+        System.out.println("Rows loaded: " + tableModel.getRowCount());
+        for (int r = 0; r < tableModel.getRowCount(); r++) {
+            System.out.println("Row " + r + " datumNarudzbe: " + tableModel.getValueAt(r, 0));
+        }
+       
+        table.setFillsViewportHeight(true);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        
+
+        // Apply enhanced visual style & status renderer
+        applyBrutalTableStyle();
+        setUpStatusRenderer();
+
+        // TABOVI
         JTabbedPane tabs = new JTabbedPane();
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.add(new JScrollPane(table), BorderLayout.CENTER);
         tabs.addTab("Podaci", mainPanel);
         tabs.addTab("Statistika", new StatistikaPanel(tableModel, 10.0));
         frame.add(tabs, BorderLayout.CENTER);
-// Učitavanje podataka i postavki
+
+        // Učitavanje podataka i postavki
         komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
         UserDatabaseHelper.loadUserTableSettings(prijavljeniKorisnik, table);
         DatabaseHelper.loadFromDatabase(tableModel);
+        debugPrintTableModelInfo();
 
-        // --- GORNJI PANEL (Pretraga + Odjava) ---
-        
+        // GORNJI PANEL (Pretraga + Odjava)
         JPanel topPanel = new JPanel(new BorderLayout());
         JPanel searchPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        JTextField searchField = new JTextField(20);
-        
+        searchField = new JTextField(20);
+
         searchField.getDocument().addDocumentListener(new DocumentListener() {
             public void insertUpdate(DocumentEvent e) { filter(); }
             public void removeUpdate(DocumentEvent e) { filter(); }
             public void changedUpdate(DocumentEvent e) { filter(); }
-            // Metoda za filtriranje redova na osnovi unosa u polje za pretragu
             private void filter() {
                 String text = searchField.getText();
                 if (text.trim().isEmpty()) {
@@ -261,88 +240,73 @@ public class UI {
         topPanel.add(searchPanel, BorderLayout.WEST);
         topPanel.add(logoutPanel, BorderLayout.EAST);
         frame.add(topPanel, BorderLayout.NORTH);
-
-        // --- DROPDOWNOVI I RENDERERI ---
         
+        
+
+        // DROPDOWNOVI I RENDERERI
         setUpStatusDropdown();
         setUpDjelatnikDropdown();
         setUpDateColumns();
+        setUpKomitentDropdown();
+        setUpPredstavnikDropdown();
 
-     // In createAndShowGUI()
-        // Postavljanje dropdown izbornika za kolonu Komitent
-        
-     setUpKomitentDropdown();
-     setUpPredstavnikDropdown();
+        // Opcionalno: omogućiti napredni popup za komitenta (koristi ga ako želiš)
+        enableKomitentSearchPopup();
 
-     enableKomitentSearchPopup();
-
-        // --- NOVO: Dvoklik popup za komitenta ---
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga
-     // Ažurira odgovarajuće ćelije u modelu tablice
-     // 2 = kolona KomitentOpis
-     // 15 = kolona Trg. predstavnik
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga		
-     // Ažurira odgovarajuće ćelije u modelu tablice
-     // 2 = kolona KomitentOpis
-     // 15 = kolona Trg. predstavnik
-     // Dodaje MouseListener na JTable za detekciju dvoklika
-     // Omogućava odabir komitenta iz posebnog dijaloga
-        table.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2) {
-                    int viewRow = table.getSelectedRow();
-                    int viewCol = table.getSelectedColumn();
-                    if (viewRow < 0 || viewCol < 0) return;
-                    int modelCol = table.convertColumnIndexToModel(viewCol);
-                    int modelRow = table.convertRowIndexToModel(viewRow);
-                    if (modelCol == KOMITENT_OPIS_COL) {
-                        String odabraniOpis = KomitentSearchDialog.showDialog(frame);
-                        if (odabraniOpis != null && !odabraniOpis.isEmpty()) {
-                            tableModel.setValueAt(odabraniOpis, modelRow, KOMITENT_OPIS_COL);
-                            String tp = komitentTPMap.getOrDefault(odabraniOpis, "");
-                            tableModel.setValueAt(tp, modelRow, TP_COL);
-                        }
-                    }
-                }
-            }
-        });
-
-        setUpKomitentDropdown(); // u ovoj metodi ne postavljati cellEditor za kolonu 2
-
-        // --- LISTENERI I ADMIN POPUP ---
-        
+        // LISTENERI I ADMIN POPUP
         setUpListeners();
         setUpAdminUnlockPopup();
 
-        // --- SAKRIVANJE KOLONA ---
+        // DOUBLE-CLICK EDITORS AND HANDLERS
+        enforceDoubleClickEditors();
+        enableDoubleClickOpeners();
+
+        // SAKRIVANJE KOLONA
         hideColumns(8, 9, 10);
-        // --- DONJI PANEL S GUMBIMA ---
-        
+
+        // DONJI PANEL S GUMBIMA
         JPanel bottom = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         JButton btnImport  = new JButton("Uvezi iz Excela");
+        JButton btnMarkProduced = new JButton("Označi IZRAĐENO iz Excela");
+        btnMarkProduced.addActionListener(e -> handleMarkProducedFromExcel());
         btnImport.addActionListener(e -> {
             ExcelImporter.importFromExcel(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Kliknuo UVEZI iz Excela");
         });
+        
+        
+        
         JButton btnExport  = new JButton("Izvezi u Excel");
         btnExport.addActionListener(e -> {
             ExcelExporter.exportTableToExcel(tableModel);
             ActionLogger.log(prijavljeniKorisnik, "Kliknuo IZVEZI iz Excel");
         });
+        
+
         JButton btnSaveDb  = new JButton("Spremi u bazu");
         btnSaveDb.addActionListener(e -> {
+            if (table.isEditing()) {
+                TableCellEditor ed = table.getCellEditor();
+                if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+            }
             DatabaseHelper.saveToDatabase(tableModel);
             UserDatabaseHelper.saveUserTableSettings(prijavljeniKorisnik, table);
             ActionLogger.log(prijavljeniKorisnik, "Spremio u bazu");
         });
         JButton btnLoadDb  = new JButton("Učitaj iz baze");
-        btnLoadDb.addActionListener(e -> {
-            DatabaseHelper.loadFromDatabase(tableModel);
-            ActionLogger.log(prijavljeniKorisnik, "Učitao iz baze");
-        });
+		btnLoadDb.addActionListener(e -> {
+			if (table.isEditing()) {
+				TableCellEditor ed = table.getCellEditor();
+				if (ed != null)
+					try {
+						ed.stopCellEditing();
+					} catch (Exception ignored) {
+					}
+			}
+			DatabaseHelper.loadFromDatabase(tableModel);
+			UserDatabaseHelper.loadUserTableSettings(prijavljeniKorisnik, table);
+			ActionLogger.log(prijavljeniKorisnik, "Učitao iz baze");
+		});
 
         JButton btnRefresh = new JButton("Osvježi izračune");
         btnRefresh.addActionListener(e -> {
@@ -353,7 +317,7 @@ public class UI {
         JButton btnAddItem = new JButton("Dodaj artikal");
         btnAddItem.addActionListener(e -> {
             Object[] emptyRow = new Object[]{
-                "", "", "", "", null, null, "", "", null, null, null, null, null, null, ""
+                    "", "", "", "", null, null, "", "", null, null, null, null, null, null, ""
             };
             tableModel.addRow(emptyRow);
             int newRowIndex = tableModel.getRowCount() - 1;
@@ -383,20 +347,6 @@ public class UI {
             }
         });
 
-        // --- ADMIN OPCIJA: Dodavanje korisnika ---
-        // Prikaz gumba samo ako je korisnik administrator
-        // 15 = kolona Trg. predstavnik
-        // Postavljanje cellEditora za kolonu Trg. predstavnik
-        // Koristi JComboBox s popisom djelatnika
-        // Postavljanje renderera za bolji izgled ćelija
-        // 15 = kolona Trg. predstavnik
-        // Postavljanje cellEditora za kolonu Trg. predstavnik
-        // Koristi JComboBox s popisom djelatnika
-        // Postavljanje renderera za bolji izgled ćelija
-        // 15 = kolona Trg. predstavnik
-        // Postavljanje cellEditora za kolonu Trg. predstavnik
-        // Koristi JComboBox s popisom djelatnika
-        
         if ("Administrator".equals(ulogaKorisnika)) {
             JButton btnAddUser = new JButton("Dodaj korisnika");
             btnAddUser.addActionListener(e -> {
@@ -406,31 +356,75 @@ public class UI {
             bottom.add(btnAddUser);
         }
 
-        // Dodavanje svih gumba na donji panel
+        // NEW: import missing komitenti from current table (orders)
+        JButton btnImportKomitenti = new JButton("Uvezi komitente");
+        btnImportKomitenti.addActionListener(e -> {
+            if (table.isEditing()) {
+                TableCellEditor ed = table.getCellEditor();
+                if (ed != null) try { ed.stopCellEditing(); } catch (Exception ignored) {}
+            }
+            int added = 0;
+            Set<String> existing = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            java.util.List<String> namesFromDb = KomitentiDatabaseHelper.loadAllKomitentNames();
+            if (namesFromDb != null) existing.addAll(namesFromDb);
+            for (int r = 0; r < tableModel.getRowCount(); r++) {
+                Object o = tableModel.getValueAt(r, KOMITENT_OPIS_COL);
+                if (o == null) continue;
+                String naziv = o.toString().trim();
+                if (naziv.isEmpty()) continue;
+                if (!existing.contains(naziv)) {
+                    try {
+                        KomitentiDatabaseHelper.insertIfNotExists(naziv, "");
+                        existing.add(naziv);
+                        added++;
+                    } catch (Exception ex) {
+                        System.out.println("Greška pri insertIfNotExists za: " + naziv + " -> " + ex.getMessage());
+                    }
+                }
+            }
+            komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+            JOptionPane.showMessageDialog(frame, "Uvezeno novih komitenata: " + added);
+            ActionLogger.log(prijavljeniKorisnik, "Uvezao komitente iz tablice, dodano: " + added);
+        });
+        
+     
+
         bottom.add(btnImport);
+        bottom.add(btnMarkProduced);
         bottom.add(btnExport);
         bottom.add(btnSaveDb);
         bottom.add(btnLoadDb);
         bottom.add(btnRefresh);
         bottom.add(btnDelete);
+        bottom.add(btnImportKomitenti);
 
-        // Primjena stila gumba
+
         applyBrutalButtonStyle(bottom);
 
-        // Dodaj donji panel u frame
         frame.add(bottom, BorderLayout.SOUTH);
+        
+        DatabaseHelper.loadFromDatabase(tableModel);
+        System.out.println("Rows loaded: " + tableModel.getRowCount());
+        debugPrintTableModelInfo();
+        computePlanDatumIsporukeForAllRows();
+        tableModel.fireTableDataChanged();
+        table.repaint();
 
-        // --- ZAVRŠNI DIO ---
+        // ZAVRŠNI DIO
         frame.setVisible(true);
         DatabaseHelper.initializeDatabase();
         ActionLogger.log(prijavljeniKorisnik, "Otvorio glavni prozor kao " + ulogaKorisnika);
     }
+    
+    
+   
 
+    // --- Helpers / Listeners / Business logic ---
 
+    private void resetInactivityTimer() {
+        if (inactivityTimer != null) inactivityTimer.restart();
+    }
 
-    /**
-     * Logira promjenu statusa artikla.
-     */
     private void logPromjenaStatusa(JTable table, int kolonaNazivRobe,
                                     String prijavljeniKorisnik, String noviStatus, String startTime) {
         int selectedRow = table.getSelectedRow();
@@ -440,9 +434,6 @@ public class UI {
                 "Promjena statusa na '" + noviStatus + "'", tableModel, modelRow);
     }
 
-    /**
-     * Ponovno računa sve redove u tablici.
-     */
     private void recomputeAllRows() {
         for (int r = 0; r < tableModel.getRowCount(); r++) {
             recomputeRow(r);
@@ -453,82 +444,208 @@ public class UI {
 
     /**
      * Računa trajanje između start i end vremena za jedan red.
+     * Preferira WorkingTimeCalculator.calculateWorkingMinutes(LocalDateTime, LocalDateTime).
+     * Ako parsing ne uspije, fallback na tekstualni calculateWorkingDuration.
      */
-    // 14 = duration
-    // 12 = startTime
-    // 13 = endTime
-    // Računa trajanje između start i end vremena za jedan red.
     private void recomputeDuration(int row) {
-        Object startObj = tableModel.getValueAt(row, 12);
-        Object endObj   = tableModel.getValueAt(row, 13);
+        int idxStart = tableModel.findColumn("startTime");
+        int idxEnd   = tableModel.findColumn("endTime");
+        int idxDur   = tableModel.findColumn("duration");
+
+        if (idxStart == -1) idxStart = START_TIME_COL;
+        if (idxEnd == -1) idxEnd = END_TIME_COL;
+        if (idxDur == -1) idxDur = DURATION_COL;
+
+        System.out.println("recomputeDuration: row=" + row + " idxStart=" + idxStart + " idxEnd=" + idxEnd + " idxDur=" + idxDur);
+
+        Object startObj = tableModel.getValueAt(row, idxStart);
+        Object endObj   = tableModel.getValueAt(row, idxEnd);
 
         String start = startObj == null ? "" : startObj.toString().trim();
         String end   = endObj   == null ? "" : endObj.toString().trim();
 
+        System.out.println("recomputeDuration: start='" + start + "' end='" + end + "'");
+
         if (start.isBlank() || end.isBlank()) {
-            tableModel.setValueAt("", row, 14);
+            tableModel.setValueAt("", row, idxDur);
+            System.out.println("recomputeDuration: prazni start ili end -> duration resetiran.");
             return;
         }
 
-        // Pronalazak indeksa kolone "duration"
-        int columnIndex = -1;
-        for (int i = 0; i < columnNames.length; i++) {
-            if ("duration".equals(columnNames[i])) {
-                columnIndex = i;
-                break;
-            }
-        }
-        if (columnIndex == -1) {
-            // ne bi se trebalo dogoditi — ali sigurnosna provjera
-            System.err.println("Greška: kolona 'duration' nije pronađena.");
-            return;
-        }
+        String outValue = "";
+        LocalDateTime startDT = tryParseLocalDateTime(start);
+        LocalDateTime endDT = tryParseLocalDateTime(end);
 
-        // Debug: ispiši što pokušavamo parsirati (možete zamijeniti System.out sa ActionLoggerom)
-        System.out.println("recomputeDuration row=" + row + " start='" + start + "' end='" + end + "'");
-
-        String duration;
         try {
-            duration = WorkingTimeCalculator.calculateWorkingDuration(start, end);
+            if (startDT != null && endDT != null) {
+                if (endDT.isBefore(startDT)) {
+                    System.err.println("recomputeDuration: end prije starta (red " + row + "). start=" + startDT + " end=" + endDT + " -> duration resetiran.");
+                    tableModel.setValueAt("", row, idxDur);
+                    return;
+                }
+                long minutes = WorkingTimeCalculator.calculateWorkingMinutes(startDT, endDT);
+                System.out.println("recomputeDuration: working minutes = " + minutes);
+                if (minutes > 0) {
+                    long hh = minutes / 60;
+                    long mm = minutes % 60;
+                    outValue = String.format("%02d:%02d", hh, mm);
+                } else {
+                    outValue = "";
+                }
+            } else {
+                System.out.println("recomputeDuration: parsiranje nije uspjelo za oba datuma, fallback na originalne stringove.");
+                String workingCalc = WorkingTimeCalculator.calculateWorkingDuration(start, end);
+                System.out.println("recomputeDuration: WorkingTimeCalculator raw output: \"" + workingCalc + "\"");
+                String hhmm = convertWorkingToHHMM_orFallback(workingCalc);
+                System.out.println("recomputeDuration: parsed outValue=\"" + hhmm + "\"");
+                outValue = hhmm;
+            }
         } catch (Exception ex) {
-            // Ako parser baci iznimku, ne propustiti daljnji rad aplikacije
             ex.printStackTrace();
-            duration = "";
+            outValue = "";
         }
 
-        tableModel.setValueAt(duration, row, columnIndex);
+        tableModel.setValueAt(outValue, row, idxDur);
     }
 
     /**
-     * Dodaje listener na model tablice.
+     * Robustni parser za razne formate datuma/vremena u LocalDateTime.
      */
-    // Postavlja automatske izračune i ažuriranja ovisno o promjenama ćelija.
-    // Također ažurira trgovačkog predstavnika na osnovi komitenta.
-    // 0 = kolona KomitentOpis
-    // 3 = kolona Naziv robe
-    // 5 = kolona Kom
-    // 8 = kolona mm
-    //
-    // 9 = kolona m
-    // 10 = kolona tisucl
-    // 11 = kolona m2
-    // 12 = kolona startTime
-    // 13 = kolona endTime
-    // 14 = kolona duration
-    // 15 = kolona Trg. predstavnik
+    private LocalDateTime tryParseLocalDateTime(String s) {
+        if (s == null || s.trim().isEmpty()) return null;
+        String str = s.trim();
+        if (str.endsWith(".")) str = str.substring(0, str.length() - 1).trim();
+
+        DateTimeFormatter[] fmts = new DateTimeFormatter[] {
+                DateTimeFormatter.ofPattern("d.M.yyyy H:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("d.M.yyyy HH:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy H:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy.HH:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("yyyy-MM-dd H:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd/MM/yyyy H:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("d/M/yyyy H:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("d/M/yyyy HH:mm", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("d.M.yyyy", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd.MM.yyyy", Locale.ENGLISH),
+                DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.ENGLISH)
+        };
+
+        for (DateTimeFormatter fmt : fmts) {
+            try {
+                try {
+                    return LocalDateTime.parse(str, fmt);
+                } catch (DateTimeParseException pe) {
+                    try {
+                        java.time.LocalDate d = java.time.LocalDate.parse(str, fmt);
+                        return d.atTime(0,0);
+                    } catch (DateTimeParseException ignored) {
+                        // continue
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    /**
+     * Parsiranje tekstualnog outputa od WorkingTimeCalculator u HH:mm, s fallbackom na raw string.
+     */
+    private String convertWorkingToHHMM_orFallback(String working) {
+        if (working == null) return "";
+        String s = working.trim();
+        if (s.isEmpty()) return "";
+
+        Pattern p = Pattern.compile("(\\d+)");
+        Matcher m = p.matcher(s);
+        ArrayList<Integer> nums = new ArrayList<>();
+
+        while (m.find()) {
+            try { nums.add(Integer.parseInt(m.group(1))); } catch (NumberFormatException ignored) {}
+        }
+
+        System.out.println("convertWorkingToHHMM_orFallback: extracted numbers=" + nums);
+
+        int hours = 0;
+        int minutes = 0;
+
+        if (nums.size() == 1) {
+            String low = s.toLowerCase();
+            if (low.contains("sat") || low.contains("sati") || low.contains("hour") || low.contains("h")) {
+                hours = nums.get(0);
+            } else {
+                minutes = nums.get(0);
+            }
+        } else if (nums.size() >= 2) {
+            hours = nums.get(0);
+            minutes = nums.get(1);
+        } else {
+            return s; // return raw for debugging
+        }
+
+        int totalMinutes = Math.max(0, hours * 60 + minutes);
+        if (totalMinutes == 0) return s;
+        int hh = totalMinutes / 60;
+        int mm = totalMinutes % 60;
+        return String.format("%02d:%02d", hh, mm);
+    }
+
+    /**
+     * Parsira format "sat X minuta Y" -> "HH:mm" (povrat prazan string ako 0).
+     */
+    private String convertWorkingToHHMM(String working) {
+        if (working == null) return "";
+        String s = working.trim();
+        if (s.isEmpty()) return "";
+
+        Pattern p = Pattern.compile("(\\d+)");
+        Matcher m = p.matcher(s);
+        ArrayList<Integer> nums = new ArrayList<>();
+
+        while (m.find()) {
+            try { nums.add(Integer.parseInt(m.group(1))); } catch (NumberFormatException ignored) {}
+        }
+
+        int hours = 0;
+        int minutes = 0;
+
+        if (nums.size() == 1) {
+            if (s.toLowerCase().contains("sat") || s.toLowerCase().contains("sati")) {
+                hours = nums.get(0);
+            } else {
+                minutes = nums.get(0);
+            }
+        } else if (nums.size() >= 2) {
+            hours = nums.get(0);
+            minutes = nums.get(1);
+        } else {
+            return "";
+        }
+
+        int totalMinutes = Math.max(0, hours * 60 + minutes);
+        if (totalMinutes == 0) return "";
+        int hh = totalMinutes / 60;
+        int mm = totalMinutes % 60;
+        return String.format("%02d:%02d", hh, mm);
+    }
+
+    /**
+     * Listener setup za automatske izračune i ažuriranja.
+     */
     private void setUpListeners() {
         tableModel.addTableModelListener(e -> {
             if (e.getType() != TableModelEvent.UPDATE) return;
             int row = e.getFirstRow();
             int col = e.getColumn();
 
-            // Ako se promijenio komitent (npr. kolona 0)
-            if (col == 0) {
+            if (col == 0) { // komitent promjena
                 Object komitentVal = tableModel.getValueAt(row, 0);
                 if (komitentVal != null) {
                     String komitent = komitentVal.toString();
                     String predstavnik = komitentTPMap.getOrDefault(komitent, "");
-                    tableModel.setValueAt(predstavnik, row, 15); // 15 = kolona Trg. predstavnik
+                    tableModel.setValueAt(predstavnik, row, TP_COL);
                 }
             }
 
@@ -536,35 +653,82 @@ public class UI {
                 recomputeRow(row);
                 tableModel.fireTableRowsUpdated(row, row);
             }
-            if (col == 12 || col == 13) {
+            if (col == START_TIME_COL || col == END_TIME_COL) {
                 recomputeDuration(row);
-                tableModel.fireTableCellUpdated(row, 14);
+                tableModel.fireTableCellUpdated(row, DURATION_COL);
             }
         });
     }
+    
+    
+    private void handleMarkProducedFromExcel() {
+        JFileChooser fc = new JFileChooser();
+        fc.setDialogTitle("Odaberi Excel 'proizvedena roba'");
+        fc.setFileFilter(new FileNameExtensionFilter("Excel datoteke (*.xlsx, *.xls)", "xlsx", "xls"));
+        int res = fc.showOpenDialog(frame);
+        if (res != JFileChooser.APPROVE_OPTION) return;
 
+        // Zaustavi editing ako je aktivan
+        if (table.isEditing()) {
+            try { TableCellEditor ed = table.getCellEditor(); if (ed != null) ed.stopCellEditing(); } catch (Exception ignored) {}
+        }
+
+       
+
+        // Mapiranja kolona po nazivu (otpornost na raspored)
+        int idxKomitent = safeFindCol("komitentOpis", 2);
+        int idxNaziv    = safeFindCol("nazivRobe", 3);
+        int idxStatus   = safeFindCol("status", 6);
+
+        if (idxKomitent < 0 || idxNaziv < 0 || idxStatus < 0) {
+            JOptionPane.showMessageDialog(frame,
+                    "Nedostaju kolone u tablici (potrebno: komitentOpis, nazivRobe, status).",
+                    "Greška", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        int marked = 0;
+        int already = 0;
+        int notMatched = 0;
+
+        // Ključ: podudaranje SAMO po komitentOpis + nazivRobe
+
+
+        // osvježi prikaz
+        table.repaint();
+
+        // SPREMI U BAZU (po tvojoj uputi)
+        try {
+            DatabaseHelper.saveToDatabase(tableModel);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(frame, "Greška pri spremanju u bazu: " + ex.getMessage(), "Greška", JOptionPane.ERROR_MESSAGE);
+        }
+
+     
+    }
+
+    private int safeFindCol(String name, int fallback) {
+        try {
+            int idx = tableModel.findColumn(name);
+            return idx >= 0 ? idx : fallback;
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+    private static String normalize(String s) { return s == null ? "" : s.trim().toLowerCase(Locale.ROOT); }
+
+ 
+    private static int parseIntOrDefault(Object o, int def) { if (o == null) return def; try { return (int) Math.round(Double.parseDouble(o.toString().trim().replace(',', '.'))); } catch (Exception e) { return def; } }
+    private static double parseDoubleOrZero(Object o) { if (o == null) return 0.0; try { return Double.parseDouble(o.toString().trim().replace(',', '.')); } catch (Exception e) { return 0.0; } }
+    private static boolean monetaryEquals(double a, double b, double eps) { return Math.abs(a - b) <= eps; }
+
+   
 
     /**
-     * Parsira vrijednosti mm i m iz naziva robe.
+     * Parsira vrijednosti mm/m iz naziva robe.
      */
-    
-    // Naziv robe sadrži dimenzije u formatu "mm/m", npr. "50/2.5"
-    // Vraća niz s dvije vrijednosti: [mm, m]
-    // Ako nije moguće parsirati, vraća [0, 0]
-    // Primjer: "50/2.5" -> [50.0, 2.5]
-    // Primjer: "100,5 / 3,2" -> [100.5, 3.2]
-    // Ako je naziv null ili neispravan, vraća [0, 0]
     private double[] parseMmM(String naz) {
         if (naz == null) return new double[]{0, 0};
-        // Regex za pronalaženje formata "mm/m"
-        // Podržava decimalne točke i zareze
-        // Primjer: "50/2.5", "100,5 / 3,2"
-        // Hvata dvije grupe brojeva
-        // Prva grupa je mm, druga je m
-        // Omogućava razmake oko kosa crte
-        // Vraća null ako nije pronađeno podudaranje
-        // Ako je parsiranje neuspješno, hvata iznimke i vraća [0, 0]
-        // Vraća niz s dvije vrijednosti: [mm, m]
         Pattern p = Pattern.compile("(\\d+(?:[\\.,]\\d+)?)\\s*/\\s*(\\d+(?:[\\.,]\\d+)?)");
         Matcher m = p.matcher(naz);
         if (m.find()) {
@@ -573,21 +737,15 @@ public class UI {
                 double mVal = Double.parseDouble(m.group(2).replace(',', '.'));
                 return new double[]{mm, mVal};
             } catch (Exception ex) {
-                // Ignorira pogreške parsiranja
+                // ignore
             }
         }
         return new double[]{0, 0};
     }
 
     /**
-     * Ponovno računa podatke za jedan redak tablice (mm, m, tisucl, m2).
+     * Ponovno računa mm, m, tisucl, m2 za red.
      */
-    // 3 = kolona Naziv robe
-    // 8 = kolona mm
-    // 9 = kolona m
-    // 10 = kolona tisucl
-    // 11 = kolona m2
-    
     private void recomputeRow(int r) {
         double[] mmM = parseMmM((String) tableModel.getValueAt(r, 3));
         double mm   = mmM[0];
@@ -602,22 +760,14 @@ public class UI {
         Double m2 = (tisucl == null || kom == 0) ? null : tisucl * kom;
         tableModel.setValueAt(m2, r, 11);
     }
+
     /**
-     * Sakriva specificirane kolone tablice.
+     * Sakriva kolone prema model indeksima.
      */
-    // Prima indekse kolona prema modelu tablice.
-    // Postavlja širinu kolona na 0 i onemogućava njihovo mijenjanje veličine.
-    // Indeksi se konvertiraju iz modela u prikaz (view) prije primjene.
-    // Indeksi kolona su prema modelu tablice.
-    // Primjer: hideColumns(8, 9, 10) sakriva kolone mm, m, tisucl.
-    // 8 = kolona mm
-    // 9 = kolona m
-    // 10 = kolona tisucl
-    
     private void hideColumns(int... modelIndexes) {
         for (int mi : modelIndexes) {
             int vi = table.convertColumnIndexToView(mi);
-            if (vi >= 0) {
+            if (vi >= 0 && vi < table.getColumnModel().getColumnCount()) {
                 TableColumn col = table.getColumnModel().getColumn(vi);
                 col.setMinWidth(0);
                 col.setMaxWidth(0);
@@ -627,129 +777,354 @@ public class UI {
         }
     }
 
- // Konstante — prilagodi indekse svom modelu
-    // 6 = kolona status
-    // 12 = kolona startTime
-    // 13 = kolona endTime
-    // 14 = kolona duration
-    // 15 = kolona Trg. predstavnik
-    // Indeksi su prema modelu tablice (ne prema prikazu)
-  
-    private static final int STATUS_COL_MODEL = 6;
-    private static final int START_TIME_COL   = 12;
-    private static final int END_TIME_COL     = 13;
+    /**
+     * Postavlja dropdown editor za kolonu komitent (kolona 2).
+     */
+    private void setUpKomitentDropdown() {
+        int viewIdx = table.convertColumnIndexToView(KOMITENT_OPIS_COL);
+        if (viewIdx < 0) return;
+        java.util.List<String> all = KomitentiDatabaseHelper.loadAllKomitentNames();
+        JComboBox<String> combo = new JComboBox<>(all.toArray(new String[0]));
+        combo.setEditable(true);
+        combo.setLightWeightPopupEnabled(false); // fix for popup on some LAFs
+        combo.addActionListener(e -> {
+            Object selObj = combo.getSelectedItem();
+            if (selObj != null) {
+                String noviKomitent = selObj.toString().trim();
+                int row = table.getSelectedRow();
+                if (row >= 0 && !noviKomitent.isEmpty()) {
+                    int modelRow = table.convertRowIndexToModel(row);
+                    String trenutniTP = (String) tableModel.getValueAt(modelRow, TP_COL);
+                    if (trenutniTP == null || trenutniTP.isBlank()) {
+                        String unesenTP = JOptionPane.showInputDialog(frame,
+                                "Unesi trgovačkog predstavnika za: " + noviKomitent, "");
+                        if (unesenTP == null) unesenTP = "";
+                        trenutniTP = unesenTP.trim();
+                    }
+                    tableModel.setValueAt(noviKomitent, modelRow, KOMITENT_OPIS_COL);
+                    tableModel.setValueAt(trenutniTP, modelRow, TP_COL);
+                       // postavi planDatumIsporuke na predDatumIsporuke
+            
 
+                    KomitentiDatabaseHelper.insertIfNotExists(noviKomitent, trenutniTP);
+                    komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+                    // refresh combo items
+                    combo.removeAllItems();
+                    for (String k : KomitentiDatabaseHelper.loadAllKomitentNames()) combo.addItem(k);
+                    setUpPredstavnikDropdown();
+                }
+            }
+        });
+
+        table.getColumnModel().getColumn(viewIdx).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+                super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                setText(value == null ? "" : value.toString());
+                return this;
+            }
+        });
+
+        table.getColumnModel().getColumn(viewIdx).setCellEditor(new DefaultCellEditor(combo));
+    }
+
+    /**
+     * Postavlja dropdown editor za kolonu Trg. predstavnik (kolona 15).
+     */
+    private void setUpPredstavnikDropdown() {
+        int viewIdx = table.convertColumnIndexToView(TP_COL);
+        if (viewIdx < 0) return;
+
+        JComboBox<String> combo = new JComboBox<>();
+        combo.setEditable(true);
+        combo.setLightWeightPopupEnabled(false); // fix for popup issues
+
+        try {
+            for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) combo.addItem(p);
+        } catch (Exception ignored) {}
+
+        combo.addPopupMenuListener(new PopupMenuListener() {
+            @Override
+            public void popupMenuWillBecomeVisible(PopupMenuEvent e) {
+                try {
+                    combo.removeAllItems();
+                    for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) combo.addItem(p);
+                } catch (Exception ignored) {}
+            }
+            @Override public void popupMenuWillBecomeInvisible(PopupMenuEvent e) {}
+            @Override public void popupMenuCanceled(PopupMenuEvent e) {}
+        });
+
+        combo.addActionListener(e -> {
+            Object selObj = combo.getSelectedItem();
+            if (selObj != null) {
+                String noviPredstavnik = selObj.toString().trim();
+                int row = table.getEditingRow();
+                if (row >= 0 && !noviPredstavnik.isEmpty()) {
+                    int modelRow = table.convertRowIndexToModel(row);
+                    String trenutniKomitent = (String) tableModel.getValueAt(modelRow, KOMITENT_OPIS_COL);
+                    if (trenutniKomitent == null || trenutniKomitent.isBlank()) {
+                        String unesenKomitent = JOptionPane.showInputDialog(frame,
+                                "Unesi komitenta za predstavnika: " + noviPredstavnik, "");
+                        if (unesenKomitent == null) unesenKomitent = "";
+                        trenutniKomitent = unesenKomitent.trim();
+                    }
+                    tableModel.setValueAt(trenutniKomitent, modelRow, KOMITENT_OPIS_COL);
+                    tableModel.setValueAt(noviPredstavnik, modelRow, TP_COL);
+                    KomitentiDatabaseHelper.insertIfNotExists(trenutniKomitent, noviPredstavnik);
+                    komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+                }
+            }
+        });
+
+        table.getColumnModel().getColumn(viewIdx).setCellEditor(new DefaultCellEditor(combo));
+    }
+
+    /**
+     * Postavlja dropdown izbornik za kolonu "status".
+     * Omogućuje automatsko postavljanje vremena i korisnika.
+     */
+    private void setUpStatusDropdown() {
+        int viewIdx = table.convertColumnIndexToView(STATUS_COL_MODEL);
+        if (viewIdx < 0) return;
+
+        TableColumn col = table.getColumnModel().getColumn(viewIdx);
+        String[] opcije = {"", "U izradi", "Izrađeno"};
+        JComboBox<String> combo = new JComboBox<>(opcije);
+        combo.setLightWeightPopupEnabled(false); // be safer on some LAFs
+
+        DefaultCellEditor editor = new DefaultCellEditor(combo) {
+            private Object originalValue;
+            @Override
+            public Component getTableCellEditorComponent(JTable table, Object value,
+                                                         boolean isSelected, int row, int column) {
+                originalValue = value;
+                return super.getTableCellEditorComponent(table, value, isSelected, row, column);
+            }
+            @Override
+            public Object getCellEditorValue() {
+                String sel = (String) super.getCellEditorValue();
+                int editingRowView = table.getEditingRow();
+                int modelRow = editingRowView >= 0 ? table.convertRowIndexToModel(editingRowView) : -1;
+                if (modelRow < 0) return sel;
+
+                if ("U izradi".equals(sel)) {
+                    tableModel.setValueAt("U izradi", modelRow, STATUS_COL_MODEL);
+                    tableModel.setValueAt(DateUtils.formatWithoutSeconds(LocalDateTime.now()), modelRow, START_TIME_COL);
+                    tableModel.setValueAt(prijavljeniKorisnik, modelRow, 7);
+                    ActionLogger.logTableAction(prijavljeniKorisnik, "Status 'U izradi'", tableModel, modelRow);
+                    return sel;
+
+                } else if ("Izrađeno".equals(sel)) {
+                    int ans = JOptionPane.showConfirmDialog(
+                            frame,
+                            "Potvrdi 'Izrađeno'?",
+                            "Potvrda",
+                            JOptionPane.YES_NO_CANCEL_OPTION
+                    );
+                    if (ans == JOptionPane.YES_OPTION) {
+                        tableModel.setValueAt("Izrađeno", modelRow, STATUS_COL_MODEL);
+                        Object existingEnd = tableModel.getValueAt(modelRow, END_TIME_COL);
+                        if (existingEnd == null || existingEnd.toString().isBlank()) {
+                            tableModel.setValueAt(DateUtils.formatWithoutSeconds(LocalDateTime.now()), modelRow, END_TIME_COL);
+                        }
+                        Object existingStart = tableModel.getValueAt(modelRow, START_TIME_COL);
+                        if (existingStart == null || existingStart.toString().isBlank()) {
+                            tableModel.setValueAt(DateUtils.formatWithoutSeconds(LocalDateTime.now()), modelRow, START_TIME_COL);
+                        }
+                        recomputeDuration(modelRow);
+                        ActionLogger.logTableAction(prijavljeniKorisnik, "Status 'Izrađeno'", tableModel, modelRow);
+                        return sel;
+                    } else {
+                        return originalValue == null ? "" : originalValue;
+                    }
+
+                } else {
+                    tableModel.setValueAt("", modelRow, STATUS_COL_MODEL);
+                    return "";
+                }
+            }
+        };
+
+        col.setCellEditor(editor);
+    }
+
+    /**
+     * Postavlja dropdown za kolonu djelatnik (kolona 7).
+     */
+    private void setUpDjelatnikDropdown() {
+        int viewIdx = table.convertColumnIndexToView(7);
+        if (viewIdx < 0) return;
+        TableColumn col = table.getColumnModel().getColumn(viewIdx);
+        JComboBox<String> combo = new JComboBox<>(djelatnici);
+        combo.setLightWeightPopupEnabled(false);
+        col.setCellEditor(new DefaultCellEditor(combo));
+    }
+
+    /**
+     * Postavlja editore i renderere za datumske kolone.
+     */
+    private void setUpDateColumns() {
+        // date-only: datumNarudzbe (0), predDatumIsporuke (1), planDatumIsporuke (PL_COL)
+        int[] dateOnlyCols = {0, 1, PL_COL};
+        // date-time: startTime (12), endTime (13)
+        int[] dateTimeCols = {START_TIME_COL, END_TIME_COL};
+
+        for (int c : dateOnlyCols) {
+            int v = table.convertColumnIndexToView(c);
+            if (v < 0) continue;
+            TableColumn col = table.getColumnModel().getColumn(v);
+            col.setCellEditor(new DateOnlyCellEditor());
+            col.setCellRenderer(new DateOnlyCellRenderer());
+        }
+
+        for (int c : dateTimeCols) {
+            int v = table.convertColumnIndexToView(c);
+            if (v < 0) continue;
+            TableColumn col = table.getColumnModel().getColumn(v);
+            col.setCellEditor(new DateTimeCellEditor());
+            col.setCellRenderer(new DateTimeCellRenderer());
+        }
+    }
+
+    /**
+     * Omogući napredni popup za pretragu komitenata (koristan kad ima puno komitenata).
+     */
+    private void enableKomitentSearchPopup() {
+        int komitentColView = table.convertColumnIndexToView(KOMITENT_OPIS_COL);
+        if (komitentColView < 0) return;
+
+        table.getColumnModel().getColumn(komitentColView).setCellEditor(null);
+
+        table.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2 && table.getSelectedColumn() == komitentColView) {
+                    int viewRow = table.getSelectedRow();
+                    if (viewRow < 0) return;
+                    int modelRow = table.convertRowIndexToModel(viewRow);
+
+                    JDialog dialog = new JDialog(frame, "Odaberi komitenta", true);
+                    dialog.setSize(400, 300);
+                    dialog.setLocationRelativeTo(frame);
+                    dialog.setLayout(new BorderLayout(5, 5));
+
+                    JTextField search = new JTextField();
+                    DefaultListModel<String> listModel = new DefaultListModel<>();
+                    JList<String> list = new JList<>(listModel);
+                    list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+                    java.util.List<String> komitenti = KomitentiDatabaseHelper.loadAllKomitentNames();
+                    komitenti.forEach(listModel::addElement);
+
+                    search.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+                        public void insertUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+                        public void removeUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+                        public void changedUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+                        private void filter() {
+                            String txt = search.getText().toLowerCase();
+                            listModel.clear();
+                            komitenti.stream()
+                                    .filter(k -> k.toLowerCase().contains(txt))
+                                    .forEach(listModel::addElement);
+                        }
+                    });
+
+                    Runnable selectAction = () -> {
+                        String val = list.getSelectedValue();
+                        if (val != null) {
+                            tableModel.setValueAt(val, modelRow, KOMITENT_OPIS_COL);
+                            String tp = KomitentiDatabaseHelper.loadKomitentPredstavnikMap().getOrDefault(val, "");
+                            if (tp.isBlank()) {
+                                String unesenTP = JOptionPane.showInputDialog(frame,
+                                        "Unesi trgovačkog predstavnika za: " + val, "");
+                                if (unesenTP == null) unesenTP = "";
+                                tp = unesenTP.trim();
+                                KomitentiDatabaseHelper.insertIfNotExists(val, tp);
+                            }
+                            tableModel.setValueAt(tp, modelRow, TP_COL);
+                            komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+                            dialog.dispose();
+                        }
+                    };
+
+                    list.addMouseListener(new MouseAdapter() {
+                        @Override public void mouseClicked(MouseEvent e) {
+                            if (e.getClickCount() == 2) selectAction.run();
+                        }
+                    });
+
+                    JButton btnSelect = new JButton("Odaberi");
+                    btnSelect.addActionListener(ev -> selectAction.run());
+
+                    dialog.add(search, BorderLayout.NORTH);
+                    dialog.add(new JScrollPane(list), BorderLayout.CENTER);
+                    dialog.add(btnSelect, BorderLayout.SOUTH);
+
+                    dialog.setVisible(true);
+                }
+            }
+        });
+    }
+
+    /**
+     * Postavlja popup meni za administratore (otključavanje i pregled povijesti).
+     */
     private void setUpAdminUnlockPopup() {
         if (!"Administrator".equalsIgnoreCase(ulogaKorisnika)) return;
 
         JPopupMenu adminPopup = new JPopupMenu();
 
-        // --- Otključavanje ---
-        
         JMenuItem unlockItem = new JMenuItem("Otključaj ćeliju");
         unlockItem.addActionListener(e -> {
             int viewRow = table.getSelectedRow();
-            if (viewRow < 0 || viewRow >= table.getRowCount()) {
-                System.out.println("[DEBUG unlockItem] Nema odabranog reda ili izvan raspona.");
-                return;
-            }
-// Dohvati status iz modela
-            // 6 = kolona status
-            // Konvertiraj viewRow u modelRow
-            // Provjeri je li status "Izrađeno"
-            // Ako nije, prikaži poruku i izađi
-            // Ako jest, pitaj za potvrdu otključavanja
-            // Ako korisnik odustane, izađi
-            // Pitaj za komentar (opcionalno)
-            // Ako je red već otključan, ne dodaj ponovo
-            // Postavi status na prazan string ("")
-            // Osvježi red u tablici
-            // Zapiši povijest promjene s vremenom, korisnikom i komentarom
-            // Očisti selekciju i fokus
-            // Debug ispis
-            
+            if (viewRow < 0 || viewRow >= table.getRowCount()) return;
             int modelRow = table.convertRowIndexToModel(viewRow);
             TableModel tm = table.getModel();
             Object statusVal = tm.getValueAt(modelRow, STATUS_COL_MODEL);
             String status = statusVal == null ? "" : statusVal.toString();
-
-            System.out.printf("[DEBUG unlockItem] viewRow=%d, modelRow=%d, status='%s'%n",
-                    viewRow, modelRow, status);
-
-            if (!"Izrađeno".equals(status)) {
-                System.out.println("[DEBUG unlockItem] Red nije u statusu 'Izrađeno'.");
-                return;
-            }
+            if (!"Izrađeno".equals(status)) return;
 
             int ans = JOptionPane.showConfirmDialog(
-                frame,
-                "Želite li otključati ćeliju?",
-                "Otključavanje ćelije",
-                JOptionPane.YES_NO_OPTION
+                    frame,
+                    "Želite li otključati ćeliju?",
+                    "Otključavanje ćelije",
+                    JOptionPane.YES_NO_OPTION
             );
-            if (ans != JOptionPane.YES_OPTION) {
-                System.out.println("[DEBUG unlockItem] Korisnik odustao.");
-                return;
-            }
+            if (ans != JOptionPane.YES_OPTION) return;
 
             String komentar = JOptionPane.showInputDialog(
-                frame,
-                "Unesite kratki komentar (opcionalno):",
-                ""
+                    frame,
+                    "Unesite kratki komentar (opcionalno):",
+                    ""
             );
             if (komentar == null) komentar = "";
 
-            if (!odmrznutiModelRedovi.contains(modelRow)) {
-                odmrznutiModelRedovi.add(modelRow);
-                System.out.printf("[DEBUG unlockItem] Dodan modelRow=%d u otključane.%n", modelRow);
-            }
+            if (!odmrznutiModelRedovi.contains(modelRow)) odmrznutiModelRedovi.add(modelRow);
 
-            // --- NOVO: Postavi status na prazan string ("")
             tm.setValueAt("", modelRow, STATUS_COL_MODEL);
-            System.out.printf("[DEBUG unlockItem] Status za red %d postavljen na prazan string.%n", modelRow);
-
-            // Osvježi red
             if (tm instanceof AbstractTableModel atm) {
                 atm.fireTableRowsUpdated(modelRow, modelRow);
             } else {
                 table.repaint();
             }
 
-            // Zapiši povijest
             String zapis = String.format(
-                "%s | %s | %s",
-                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(LocalDateTime.now()),
-                prijavljeniKorisnik,
-                komentar.isBlank() ? "(bez komentara)" : komentar
+                    "%s | %s | %s",
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(LocalDateTime.now()),
+                    prijavljeniKorisnik,
+                    komentar.isBlank() ? "(bez komentara)" : komentar
             );
             povijestPromjena.computeIfAbsent(modelRow, k -> new ArrayList<>()).add(zapis);
-            System.out.printf("[DEBUG unlockItem] Povijest za red %d: %s%n",
-                    modelRow, povijestPromjena.get(modelRow));
-
             table.clearSelection();
             KeyboardFocusManager.getCurrentKeyboardFocusManager().clearGlobalFocusOwner();
         });
         adminPopup.add(unlockItem);
 
-        // --- Povijest ---
-        // Prikazuje povijest promjena za odabrani red
-        // Ako nema povijesti, prikazuje odgovarajuću poruku
-        // Prikazuje povijest u JTextArea unutar JScrollPane
-        // Postavlja veličinu prozora povijesti
-        //  Prikazuje dijalog s poviješću
-        //  Ako nije odabran red, izlazi iz metode
-        //  Dohvaća povijest iz mape prema modelRow
-        //  Ako nema povijesti, prikazuje poruku
-        //  Inače, prikazuje povijest u tekstualnom području
-        //  Stilizira tekstualno područje za bolju čitljivost
-        
         JMenuItem historyItem = new JMenuItem("Prikaži povijest promjena");
         historyItem.addActionListener(e -> {
             int viewRow = table.getSelectedRow();
             if (viewRow < 0) return;
             int modelRow = table.convertRowIndexToModel(viewRow);
             java.util.List<String> lista = povijestPromjena.get(modelRow);
-
             if (lista == null || lista.isEmpty()) {
                 JOptionPane.showMessageDialog(frame, "Nema zabilježenih promjena.");
                 return;
@@ -763,22 +1138,9 @@ public class UI {
         });
         adminPopup.add(historyItem);
 
-        // --- Mouse listener ---
         table.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mousePressed(MouseEvent e) { showPopup(e); }
-
-            @Override
-            public void mouseReleased(MouseEvent e) { showPopup(e); }
-
-            // Prikazuje popup meni ako je kliknut desni klik na kolonu "status"
-            // 6 = kolona status
-            // Provjerava je li kliknut desni klik (popup trigger)
-            // Dohvaća red i kolonu na osnovi točke klika
-            // Ako je kliknut na kolonu "status", prikazuje popup meni
-            // Postavlja selekciju na kliknuti red
-            // Prikazuje popup meni na lokaciji klika
-        
+            @Override public void mousePressed(MouseEvent e) { showPopup(e); }
+            @Override public void mouseReleased(MouseEvent e) { showPopup(e); }
             private void showPopup(MouseEvent e) {
                 if (e.isPopupTrigger()) {
                     int row = table.rowAtPoint(e.getPoint());
@@ -792,337 +1154,180 @@ public class UI {
         });
     }
 
+    /**
+     * Enforce editors to start on double-click.
+     */
+    private void enforceDoubleClickEditors() {
+        // Set double-click for default table editors
+        if (table.getDefaultEditor(String.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(String.class)).setClickCountToStart(2);
+        }
+        if (table.getDefaultEditor(Integer.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(Integer.class)).setClickCountToStart(2);
+        }
+        if (table.getDefaultEditor(Double.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(Double.class)).setClickCountToStart(2);
+        }
+        if (table.getDefaultEditor(Boolean.class) instanceof DefaultCellEditor) {
+            ((DefaultCellEditor) table.getDefaultEditor(Boolean.class)).setClickCountToStart(2);
+        }
 
+        // Set double-click for specific column editors (djelatnik/startTime/endTime)
+        int djelatnikViewIdx = table.convertColumnIndexToView(7);
+        if (djelatnikViewIdx >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(djelatnikViewIdx).getCellEditor();
+            if (editor instanceof DefaultCellEditor) ((DefaultCellEditor) editor).setClickCountToStart(2);
+        }
+        int startTimeViewIdx = table.convertColumnIndexToView(START_TIME_COL);
+        if (startTimeViewIdx >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(startTimeViewIdx).getCellEditor();
+            if (editor instanceof DefaultCellEditor) ((DefaultCellEditor) editor).setClickCountToStart(2);
+        }
+        int endTimeViewIdx = table.convertColumnIndexToView(END_TIME_COL);
+        if (endTimeViewIdx >= 0) {
+            TableCellEditor editor = table.getColumnModel().getColumn(endTimeViewIdx).getCellEditor();
+            if (editor instanceof DefaultCellEditor) ((DefaultCellEditor) editor).setClickCountToStart(2);
+        }
+    }
 
     /**
-     * Postavlja dropdown izbornik za kolonu "status".
-     * Omogućuje automatsko postavljanje vremena i korisnika.
+     * Enables centralized double-click handling for opening popups and dialogs.
      */
-    // 6 = kolona status
-    // 7 = kolona djelatnik
-    // 12 = kolona startTime
-    // 13 = kolona endTime
-    // 14 = kolona duration
-    // Postavlja JComboBox s opcijama statusa
-    // Postavlja DefaultCellEditor s prilagođenim ponašanjem
-    // Pri promjeni statusa, automatski postavlja vrijeme i korisnika
-    // Logira promjenu statusa
-    // Ako je odabran isti status, ne radi ništa
-    // Ako je odabran "Izrađeno", traži potvrdu
-    // Ako korisnik odustane, vraća originalnu vrijednost
-    // Ako je odabran prazan status, briše status
-    // Postavlja editor na kolonu "status"
-    private void setUpStatusDropdown() {
-        int viewIdx = table.convertColumnIndexToView(6);
-        if (viewIdx < 0) return;
-
-        TableColumn col = table.getColumnModel().getColumn(viewIdx);
-        String[] opcije = {"", "U izradi", "Izrađeno"};
-
-        JComboBox<String> combo = new JComboBox<>(opcije);
-
-        DefaultCellEditor editor = new DefaultCellEditor(combo) {
-            private Object originalValue;
-
-            @Override
-            public Component getTableCellEditorComponent(JTable table, Object value,
-                                                         boolean isSelected, int row, int column) {
-                originalValue = value; // zapamti trenutno stanje
-                return super.getTableCellEditorComponent(table, value, isSelected, row, column);
-            }
-
-            @Override
-            public Object getCellEditorValue() {
-                String sel = (String) super.getCellEditorValue();
-//                System.out.printf("[DEBUG StatusEditor] Odabrano: '%s', Original: '%s'%n", sel, originalValue);	
-                int modelRow = table.convertRowIndexToModel(table.getEditingRow());
-//                System.out.printf("[DEBUG StatusEditor] modelRow=%d%n", modelRow);
-                // Ako je isti status, ništa ne radi
-                // Ovo sprječava višestruke logove i ažuriranja
-                // Ali pazi na null vrijednosti
-                // Ako su oba null ili oba prazna, tretiraj kao isto
-                // Inače, ako su različiti, nastavi
-                // Ovo je važno jer JComboBox može vratiti "" umjesto null
-                // Dakle, tretiraj "" i null kao ekvivalentne
-                // Ovo također sprječava probleme ako korisnik odabere isti status
-                if ("U izradi".equals(sel)) {
-                    tableModel.setValueAt("U izradi", modelRow, 6);
-                    tableModel.setValueAt(DateUtils.formatWithoutSeconds(LocalDateTime.now()), modelRow, 12);
-                    tableModel.setValueAt(prijavljeniKorisnik, modelRow, 7);
-                    ActionLogger.logTableAction(prijavljeniKorisnik, "Status 'U izradi'", tableModel, modelRow);
-                    return sel;
-
-                } else if ("Izrađeno".equals(sel)) {
-                    int ans = JOptionPane.showConfirmDialog(
-                            frame,
-                            "Potvrdi 'Izrađeno'?",
-                            "Potvrda",
-                            JOptionPane.YES_NO_CANCEL_OPTION
-                    );
-                    if (ans == JOptionPane.YES_OPTION) {
-                    	// Postavi end time na sada ako nije već postavljeno
-                        tableModel.setValueAt("Izrađeno", modelRow, 6);
-                        // Ako endTime već nije postavljeno, postavi ga
-                        tableModel.setValueAt(DateUtils.formatWithoutSeconds(LocalDateTime.now()), modelRow, 13);
-                        // Ako startTime nije postavljeno, postavi ga
-                        recomputeDuration(modelRow);
-                        // Ako djelatnik nije postavljen, postavi ga
-                        ActionLogger.logTableAction(prijavljeniKorisnik, "Status 'Izrađeno'", tableModel, modelRow);
-                        return sel;
-                    } else {
-                        return originalValue == null ? "" : originalValue;
-                    }
-
-                } else {
-                    // prazno
-                    tableModel.setValueAt("", modelRow, 6);
-                    return "";
-                }
-            }
-        };
-
-        col.setCellEditor(editor);
-    }
-
-
-
-
-
-    
-    
-    private void setUpKomitentDropdown() {
-        int viewIdx = table.convertColumnIndexToView(2); // kolona komitentOpis
-        if (viewIdx < 0) return; 
-
-        JComboBox<String> combo = new JComboBox<>(KomitentiDatabaseHelper.loadAllKomitentNames().toArray(new String[0]));
-        combo.setEditable(true); 
-
-        combo.addActionListener(e -> {
-            Object selObj = combo.getSelectedItem();
-            if (selObj != null) {
-                String noviKomitent = selObj.toString().trim();
-                int row = table.getSelectedRow();
-                if (row >= 0 && !noviKomitent.isEmpty()) {
-                    int modelRow = table.convertRowIndexToModel(row);
-
-                    String trenutniTP = (String) tableModel.getValueAt(modelRow, 15);
-                    if (trenutniTP == null || trenutniTP.isBlank()) {
-                        String unesenTP = JOptionPane.showInputDialog(frame,
-                            "Unesi trgovačkog predstavnika za: " + noviKomitent, "");
-                        if (unesenTP == null) unesenTP = "";
-                        trenutniTP = unesenTP.trim();
-                    }
-
-                    tableModel.setValueAt(noviKomitent, modelRow, 2);
-                    tableModel.setValueAt(trenutniTP, modelRow, 15);
-
-                    KomitentiDatabaseHelper.insertIfNotExists(noviKomitent, trenutniTP);
-                    komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
-
-                    combo.removeAllItems();
-                    for (String k : KomitentiDatabaseHelper.loadAllKomitentNames()) {
-                        combo.addItem(k);
-                    }
-                    setUpPredstavnikDropdown();
-                }
-            }
-        });
-
-        if (viewIdx >= 0) { table.getColumnModel().getColumn(viewIdx).setCellRenderer(new DefaultTableCellRenderer() { @Override public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) { super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column); setText(value == null ? "" : value.toString()); return this; } }); }
-        
-        table.getColumnModel().getColumn(viewIdx).setCellEditor(new DefaultCellEditor(combo));
-    }
-
-
-
-
-
-
-
-    private void setUpPredstavnikDropdown() {
-    	
-    	int viewIdx = table.convertColumnIndexToView(15); // "trgovackiPredstavnik" column if (viewIdx < 0) return;
-
-    JComboBox<String> combo = new JComboBox<>();
-    combo.setEditable(true);
-
-    // Initial load
-    for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) {
-        combo.addItem(p);
-    }
-
-    combo.addPopupMenuListener(new PopupMenuListener() {
-        @Override
-        public void popupMenuWillBecomeVisible(PopupMenuEvent e) {
-            combo.removeAllItems();
-            for (String p : KomitentiDatabaseHelper.loadAllPredstavnici()) {
-                combo.addItem(p);
-            }
-        }
-        @Override public void popupMenuWillBecomeInvisible(PopupMenuEvent e) {}
-        @Override public void popupMenuCanceled(PopupMenuEvent e) {}
-    });
-
-    combo.addActionListener(e -> {
-        Object selObj = combo.getSelectedItem();
-        if (selObj != null) {
-            String noviPredstavnik = selObj.toString().trim();
-            int row = table.getEditingRow();
-            if (row >= 0 && !noviPredstavnik.isEmpty()) {
-                int modelRow = table.convertRowIndexToModel(row);
-
-                String trenutniKomitent = (String) tableModel.getValueAt(modelRow, 2);
-                if (trenutniKomitent == null || trenutniKomitent.isBlank()) {
-                    String unesenKomitent = JOptionPane.showInputDialog(frame,
-                        "Unesi komitenta za predstavnika: " + noviPredstavnik, "");
-                    if (unesenKomitent == null) unesenKomitent = "";
-                    trenutniKomitent = unesenKomitent.trim();
-                }
-
-                tableModel.setValueAt(trenutniKomitent, modelRow, 2);
-                tableModel.setValueAt(noviPredstavnik, modelRow, 15);
-
-                KomitentiDatabaseHelper.insertIfNotExists(trenutniKomitent, noviPredstavnik);
-                komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
-            }
-        }
-    });
-
-    table.getColumnModel().getColumn(viewIdx).setCellEditor(new DefaultCellEditor(combo));
-    }
-
-    
-
-
-
-
-
-    /**
-     * Postavlja dropdown izbornik za kolonu "djelatnik".
-     */
-    private void setUpDjelatnikDropdown() {
-        int viewIdx = table.convertColumnIndexToView(7);
-        if (viewIdx < 0) return;
-        TableColumn col = table.getColumnModel().getColumn(viewIdx);
-        JComboBox<String> combo = new JComboBox<>(djelatnici);
-        col.setCellEditor(new DefaultCellEditor(combo));
-    }
-    
-    
-    private void enableKomitentSearchPopup() {
-        int komitentColView = table.convertColumnIndexToView(2);
-        if (komitentColView < 0) return;
-
-        table.getColumnModel().getColumn(komitentColView).setCellEditor(null);
-
+ // Zamijeni postojeću metodu enableDoubleClickOpeners ovim kodom u ui/UI.java
+    private void enableDoubleClickOpeners() {
         table.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2 && table.getSelectedColumn() == komitentColView) {
-                    int viewRow = table.getSelectedRow();
-                    if (viewRow < 0) return;
+                if (e.getClickCount() == 2) {
+                    int viewRow = table.rowAtPoint(e.getPoint());
+                    int viewCol = table.columnAtPoint(e.getPoint());
+                    if (viewRow < 0 || viewCol < 0) return;
                     int modelRow = table.convertRowIndexToModel(viewRow);
+                    int modelCol = table.convertColumnIndexToModel(viewCol);
 
-                    JDialog dialog = new JDialog(frame, "Odaberi komitenta", true);
-                    dialog.setSize(400, 300);
-                    dialog.setLocationRelativeTo(frame);
-                    dialog.setLayout(new BorderLayout(5, 5));
+                    System.out.println("Double-click at modelRow=" + modelRow + ", modelCol=" + modelCol);
 
-                    JTextField searchField = new JTextField();
-                    DefaultListModel<String> listModel = new DefaultListModel<>();
-                    JList<String> list = new JList<>(listModel);
-                    list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-
-                    java.util.List<String> komitenti = KomitentiDatabaseHelper.loadAllKomitentNames();
-                    komitenti.forEach(listModel::addElement);
-
-                    searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-                        public void insertUpdate(javax.swing.event.DocumentEvent e) { filter(); }
-                        public void removeUpdate(javax.swing.event.DocumentEvent e) { filter(); }
-                        public void changedUpdate(javax.swing.event.DocumentEvent e) { filter(); }
-                        private void filter() {
-                            String txt = searchField.getText().toLowerCase();
-                            listModel.clear();
-                            komitenti.stream()
-                                    .filter(k -> k.toLowerCase().contains(txt))
-                                    .forEach(listModel::addElement);
-                        }
-                    });
-
-                    Runnable selectAction = () -> {
-                        String val = list.getSelectedValue();
-                        if (val != null) {
-                            tableModel.setValueAt(val, modelRow, 2);
-                            String tp = KomitentiDatabaseHelper.loadKomitentPredstavnikMap().getOrDefault(val, "");
-                            if (tp.isBlank()) {
-                                String unesenTP = JOptionPane.showInputDialog(frame,
-                                    "Unesi trgovačkog predstavnika za: " + val, "");
-                                if (unesenTP == null) unesenTP = "";
-                                tp = unesenTP.trim();
-                                KomitentiDatabaseHelper.insertIfNotExists(val, tp);
+                    if (modelCol == KOMITENT_OPIS_COL) {
+                        openKomitentDialog(modelRow);
+                    } else {
+                        if (tableModel.isCellEditable(modelRow, modelCol)) {
+                            if (table.editCellAt(viewRow, viewCol)) {
+                                Component editor = table.getEditorComponent();
+                                if (editor != null) {
+                                    editor.requestFocus();
+                                    if (editor instanceof JComboBox) {
+                                        final JComboBox<?> cb = (JComboBox<?>) editor;
+                                        // Ako je komponenta već prikazana, pokaži odmah popup.
+                                        // Inače odgodi prikaz na EDT (i provjeri ponovno isShowing).
+                                        try {
+                                            if (cb.isShowing()) {
+                                                cb.showPopup();
+                                            } else {
+                                                SwingUtilities.invokeLater(() -> {
+                                                    try {
+                                                        if (cb.isShowing()) cb.showPopup();
+                                                    } catch (IllegalComponentStateException ex) {
+                                                        // dodatna zaštita - ignoriraj ako još uvijek nije prikazano
+                                                        System.out.println("showPopup aborted: " + ex.getMessage());
+                                                    }
+                                                });
+                                            }
+                                        } catch (IllegalComponentStateException ex) {
+                                            // zaštitni fallback
+                                            SwingUtilities.invokeLater(() -> {
+                                                try {
+                                                    if (cb.isShowing()) cb.showPopup();
+                                                } catch (Exception ignored) {}
+                                            });
+                                        }
+                                    }
+                                }
+                                System.out.println("Started editing cell at row=" + viewRow + ", col=" + viewCol);
                             }
-                            tableModel.setValueAt(tp, modelRow, 15);
-                            komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
-                            dialog.dispose();
                         }
-                    };
-
-                    list.addMouseListener(new MouseAdapter() {
-                        @Override
-                        public void mouseClicked(MouseEvent e) {
-                            if (e.getClickCount() == 2) selectAction.run();
-                        }
-                    });
-
-                    JButton btnSelect = new JButton("Odaberi");
-                    btnSelect.addActionListener(ev -> selectAction.run());
-
-                    dialog.add(searchField, BorderLayout.NORTH);
-                    dialog.add(new JScrollPane(list), BorderLayout.CENTER);
-                    dialog.add(btnSelect, BorderLayout.SOUTH);
-
-                    dialog.setVisible(true);
+                    }
                 }
             }
         });
     }
 
-
-
-
-
-
-
-
-
     /**
-     * Postavlja editor i renderer za kolone s datumom i vremenom.
+     * Opens komitent selection dialog for the specified model row.
      */
-    
-    
-    private void setUpDateColumns() {
-        int[] dateCols = {0, 1, 12, 13};
-        for (int c : dateCols) {
-            int v = table.convertColumnIndexToView(c);
-            if (v < 0) continue;
-            TableColumn col = table.getColumnModel().getColumn(v);
-            col.setCellEditor(new CalendarTimeCellEditor());
-            col.setCellRenderer(new CalendarTimeCellRenderer());
-        }
+    private void openKomitentDialog(int modelRow) {
+        JDialog dialog = new JDialog(frame, "Odaberi komitenta", true);
+        dialog.setSize(400, 300);
+        dialog.setLocationRelativeTo(frame);
+        dialog.setLayout(new BorderLayout(5, 5));
+
+        JTextField sf = new JTextField();
+        DefaultListModel<String> listModel = new DefaultListModel<>();
+        JList<String> list = new JList<>(listModel);
+        list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+        java.util.List<String> komitenti = KomitentiDatabaseHelper.loadAllKomitentNames();
+        komitenti.forEach(listModel::addElement);
+
+        sf.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { filter(); }
+            private void filter() {
+                String txt = sf.getText().toLowerCase();
+                listModel.clear();
+                komitenti.stream()
+                        .filter(k -> k.toLowerCase().contains(txt))
+                        .forEach(listModel::addElement);
+            }
+        });
+
+        Runnable selectAction = () -> {
+            String val = list.getSelectedValue();
+            if (val != null) {
+                tableModel.setValueAt(val, modelRow, KOMITENT_OPIS_COL);
+                String tp = KomitentiDatabaseHelper.loadKomitentPredstavnikMap().getOrDefault(val, "");
+                if (tp.isBlank()) {
+                    String unesenTP = JOptionPane.showInputDialog(frame,
+                        "Unesi trgovačkog predstavnika za: " + val, "");
+                    if (unesenTP == null) unesenTP = "";
+                    tp = unesenTP.trim();
+                    KomitentiDatabaseHelper.insertIfNotExists(val, tp);
+                }
+                tableModel.setValueAt(tp, modelRow, TP_COL);
+                komitentTPMap = KomitentiDatabaseHelper.loadKomitentPredstavnikMap();
+                dialog.dispose();
+                System.out.println("Selected komitent: " + val + ", tp: " + tp);
+            }
+        };
+
+        list.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2) selectAction.run();
+            }
+        });
+
+        JButton btnSelect = new JButton("Odaberi");
+        btnSelect.addActionListener(ev -> selectAction.run());
+
+        dialog.add(sf, BorderLayout.NORTH);
+        dialog.add(new JScrollPane(list), BorderLayout.CENTER);
+        dialog.add(btnSelect, BorderLayout.SOUTH);
+
+        dialog.setVisible(true);
     }
 
-    /**
-     * Custom TableCellEditor za datum+vrijeme.
-     */
-    
-    private static class CalendarTimeCellEditor extends AbstractCellEditor implements TableCellEditor {
+    /* ---------------- Custom editors / renderers ---------------- */
+
+    // Date+Time editor/renderer (dd/MM/yyyy HH:mm)
+    private static class DateTimeCellEditor extends AbstractCellEditor implements TableCellEditor {
         private final JDateChooser dateChooser;
         private final JSpinner timeSpinner;
         private final JPanel panel;
+        private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
 
-        CalendarTimeCellEditor() {
+        DateTimeCellEditor() {
             dateChooser = new JDateChooser();
-            dateChooser.setDateFormatString("dd.MM.yyyy");
+            dateChooser.setDateFormatString("dd/MM/yyyy");
             SpinnerDateModel model = new SpinnerDateModel();
             timeSpinner = new JSpinner(model);
             timeSpinner.setEditor(new JSpinner.DateEditor(timeSpinner, "HH:mm"));
@@ -1133,8 +1338,16 @@ public class UI {
 
         @Override
         public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
-            LocalDateTime dt = (value instanceof String) ? DateUtils.parse((String) value) : LocalDateTime.now();
-            Date date = Date.from((dt != null ? dt : LocalDateTime.now()).atZone(ZoneId.systemDefault()).toInstant());
+            LocalDateTime dt = null;
+            if (value instanceof String s && !s.isBlank()) {
+                try {
+                    dt = LocalDateTime.parse(s, OUT_FMT);
+                } catch (Exception ex) {
+                    try { dt = DateUtils.parse(s); } catch (Exception ignored) {}
+                }
+            }
+            if (dt == null) dt = LocalDateTime.now();
+            Date date = Date.from(dt.atZone(ZoneId.systemDefault()).toInstant());
             dateChooser.setDate(date);
             timeSpinner.setValue(date);
             return panel;
@@ -1144,14 +1357,42 @@ public class UI {
         public Object getCellEditorValue() {
             Date d = dateChooser.getDate();
             Date t = (Date) timeSpinner.getValue();
-            LocalDateTime dt = LocalDateTime.ofInstant(d.toInstant(), ZoneId.systemDefault())
-                    .withHour(t.getHours()).withMinute(t.getMinutes());
-            return DateUtils.formatWithoutSeconds(dt);
+            if (d == null || t == null) return "";
+            LocalDate datePart = d.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            LocalTime timePart = t.toInstant().atZone(ZoneId.systemDefault()).toLocalTime().withSecond(0).withNano(0);
+            LocalDateTime dt = LocalDateTime.of(datePart, LocalTime.of(timePart.getHour(), timePart.getMinute()));
+            return dt.format(OUT_FMT); // dd/MM/yyyy HH:mm
+        }
+    }
+
+    private static class DateTimeCellRenderer extends DefaultTableCellRenderer {
+        private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
+
+        @Override
+        public Component getTableCellRendererComponent(JTable tbl, Object value, boolean sel, boolean foc, int row, int column) {
+            String text = "";
+            if (value instanceof String s && !s.isBlank()) {
+                try {
+                    LocalDateTime dt = LocalDateTime.parse(s, OUT_FMT);
+                    text = dt.format(OUT_FMT);
+                } catch (Exception ex) {
+                    try {
+                        LocalDateTime dt = DateUtils.parse(s);
+                        if (dt != null) text = dt.format(OUT_FMT);
+                        else text = s;
+                    } catch (Exception ex2) {
+                        text = s;
+                    }
+                }
+            }
+            Component comp = super.getTableCellRendererComponent(tbl, text, sel, foc, row, column);
+            comp.setFont(new Font("Segoe UI", Font.PLAIN, 13));
+            return comp;
         }
     }
 
     /**
-     * Custom renderer za prikaz datuma+vremena.
+     * Custom renderer za prikaz datuma+vremena (koristi DateUtils.formatWithoutSeconds ako moguće).
      */
     private static class CalendarTimeCellRenderer extends DefaultTableCellRenderer {
         @Override
@@ -1167,8 +1408,77 @@ public class UI {
         }
     }
 
+    // Date-only editor/renderer (dd/MM/yyyy)
+    private static class DateOnlyCellEditor extends AbstractCellEditor implements TableCellEditor {
+        private final JDateChooser dateChooser;
+        private final JPanel panel;
+        private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+        DateOnlyCellEditor() {
+            dateChooser = new JDateChooser();
+            dateChooser.setDateFormatString("dd/MM/yyyy");
+            panel = new JPanel(new BorderLayout(4, 0));
+            panel.add(dateChooser, BorderLayout.CENTER);
+        }
+
+        @Override
+        public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
+            LocalDate date = null;
+            if (value instanceof String s && !s.isBlank()) {
+                try { date = LocalDate.parse(s, OUT_FMT); } catch (Exception ex) {
+                    try {
+                        LocalDateTime dt = DateUtils.parse(s);
+                        if (dt != null) date = dt.toLocalDate();
+                    } catch (Exception ignored) {}
+                }
+            }
+            if (date == null) date = LocalDate.now();
+            Date dd = Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
+            dateChooser.setDate(dd);
+            return panel;
+        }
+
+        @Override
+        public Object getCellEditorValue() {
+            Date d = dateChooser.getDate();
+            if (d == null) return "";
+            LocalDate ld = d.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            return ld.format(OUT_FMT);
+        }
+    }
+
+    private static class DateOnlyCellRenderer extends DefaultTableCellRenderer {
+        private static final DateTimeFormatter OUT_FMT = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+        @Override
+        public Component getTableCellRendererComponent(JTable tbl, Object value, boolean sel, boolean foc, int row, int column) {
+            String text = "";
+            if (value instanceof String && !((String) value).isEmpty()) {
+                LocalDate date = null;
+                try { date = LocalDate.parse((String) value, OUT_FMT); }
+                catch (Exception ex) {
+                    try {
+                        LocalDateTime dt = DateUtils.parse((String) value);
+                        if (dt != null) date = dt.toLocalDate();
+                    } catch (Exception ignored) {}
+                }
+                text = (date != null) ? date.format(OUT_FMT) : (String) value;
+            }
+            Component comp = super.getTableCellRendererComponent(tbl, text, sel, foc, row, column);
+            comp.setFont(new Font("Segoe UI", Font.PLAIN, 13));
+            return comp;
+        }
+    }
+
     /**
-     * Primjenjuje vizualni stil na JTable.
+     * Inicijalizacija podataka za otključavanje / povijest.
+     */
+    private void initUnlockHistoryData() {
+        if (povijestPromjena == null) povijestPromjena = new HashMap<>();
+        if (odmrznutiModelRedovi == null) odmrznutiModelRedovi = new HashSet<>();
+    }
+
+    /**
+     * Primjenjuje vizualni stil na JTable (zebra, hover, padding, header).
      */
     private void applyBrutalTableStyle() {
         table.setFont(new Font("Segoe UI", Font.PLAIN, 14));
@@ -1178,7 +1488,6 @@ public class UI {
         table.setRowHeight(30);
 
         // Zebra + hover + padding
-        
         table.setDefaultRenderer(Object.class, new DefaultTableCellRenderer() {
             private final Color evenColor = new Color(240, 243, 245);
             private final Color oddColor = new Color(225, 230, 235);
@@ -1217,85 +1526,688 @@ public class UI {
         header.setBackground(new Color(58, 105, 180)); // elegantna plava
         header.setReorderingAllowed(true);
         header.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(200, 200, 200)));
+        
+     
     }
     
-	private void setUpStatusRenderer() {
-		int viewIdx = table.convertColumnIndexToView(STATUS_COL_MODEL);
-		if (viewIdx < 0)
-			return;
-
-		table.getColumnModel().getColumn(viewIdx).setCellRenderer(new DefaultTableCellRenderer() {
-			@Override
-			public Component getTableCellRendererComponent(JTable tbl, Object value, boolean sel, boolean foc, int row,
-					int column) {
-				String text = value == null ? "" : value.toString();
-				Component comp = super.getTableCellRendererComponent(tbl, text, sel, foc, row, column);
-				switch (text) {
-				case "U izradi" -> comp.setBackground(new Color(255, 255, 200));
-				case "Izrađeno" -> comp.setBackground(new Color(200, 255, 200));
-				default -> comp.setBackground(row % 2 == 0 ? new Color(240, 243, 245) : new Color(225, 230, 235));
-				}
-				if (sel)
-					comp.setBackground(new Color(180, 205, 255));
-				return comp;
-			}
-		});
-	}
-    
 
 
+
+ // Java
+// private void computePlanDatumIsporukeForAllRows() {
+//	 System.out.println("Computing Plan Datum Isporuke for all rows...");
+//     int idxOrderDate = tableModel.findColumn("datumNarudzbe");
+//     System.out.println("Index of datumNarudzbe column: " + idxOrderDate);
+//     if (idxOrderDate < 0) return;
+//     System.out.println("Total rows in table model: " + tableModel.getRowCount());
+//     DateTimeFormatter[] fmts = {
+//  
+//         DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+//         DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+//            DateTimeFormatter.ofPattern("yyyy-MM-dd"),
+//     };
+//     for (int r = 0; r < tableModel.getRowCount(); r++) {
+//    	 System.out.println("Processing row " + r);
+//         Object orderDateObj = tableModel.getValueAt(r, idxOrderDate);
+//         System.out.println("datumNarudzbe value: " + orderDateObj);
+//         String orderDateStr = orderDateObj == null ? "" : orderDateObj.toString().trim();
+//         System.out.println("Trimmed datumNarudzbe: '" + orderDateStr + "'");
+//         LocalDate orderDate = null;
+//         System.out.println("Attempting to parse datumNarudzbe...");
+//         for (DateTimeFormatter fmt : fmts) {
+//             try {
+//                 orderDate = LocalDate.parse(orderDateStr, fmt);
+//                 System.out.println("Parsed datumNarudzbe: " + orderDate);
+//                 break;
+//             } catch (Exception ignored) {}
+//         }
+////         String planDatumIsporukeValue = "";
+////         if (orderDate != null) {
+////             LocalDate planDate = orderDate.plusDays(7);
+////             planDatumIsporukeValue = planDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
+////             System.out.println("Computed planDatumIsporuke: " + planDatumIsporukeValue);
+////         }
+//        // tableModel.setValueAt(planDatumIsporukeValue, r, PL_COL);
+//         //System.out.println("Set planDatumIsporuke for row " + r + " to: " + planDatumIsporukeValue);
+//     }
+//     tableModel.fireTableDataChanged();
+//     System.out.println("Completed computing Plan Datum Isporuke for all rows.");
+// }
 
 
 
     /**
+     * Postavlja renderer za status kolonu (boje ovisno o statusu).
+     */
+    private void setUpStatusRenderer() {
+        int viewIdx = table.convertColumnIndexToView(STATUS_COL_MODEL);
+        if (viewIdx < 0) return;
+
+        table.getColumnModel().getColumn(viewIdx).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable tbl, Object value, boolean sel, boolean foc, int row,
+                                                           int column) {
+                String text = value == null ? "" : value.toString();
+                Component comp = super.getTableCellRendererComponent(tbl, text, sel, foc, row, column);
+                switch (text) {
+                    case "U izradi" -> comp.setBackground(new Color(255, 255, 200));
+                    case "Izrađeno" -> comp.setBackground(new Color(200, 255, 200));
+                    default -> comp.setBackground(row % 2 == 0 ? new Color(240, 243, 245) : new Color(225, 230, 235));
+                }
+                if (sel) comp.setBackground(new Color(180, 205, 255));
+                return comp;
+            }
+        });
+    }
+
+    /**
      * Primjenjuje vizualni stil na gumbe unutar panela.
      */
-    private void applyBrutalButtonStyle(JPanel panel) {
-        for (Component comp : panel.getComponents()) {
-            if (comp instanceof JButton btn) {
-                btn.setFont(new Font("Segoe UI", Font.BOLD, 13));
-                btn.setBackground(new Color(40, 80, 180));
-                btn.setForeground(Color.WHITE);
-                btn.setFocusPainted(false);
-                btn.setBorder(BorderFactory.createEmptyBorder(8, 18, 8, 18));
-                btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+    private void applyBrutalButtonStyle(Container c) {
+        for (Component comp : c.getComponents()) {
+            if (comp instanceof JButton b) {
+                b.setFont(new Font("Segoe UI", Font.BOLD, 13));
+                b.setBackground(new Color(40, 80, 180));
+                b.setForeground(Color.WHITE);
+                b.setFocusPainted(false);
+                b.setBorder(BorderFactory.createEmptyBorder(8, 18, 8, 18));
+                b.setCursor(new Cursor(Cursor.HAND_CURSOR));
 
-                btn.addMouseListener(new MouseAdapter() {
-                    @Override public void mouseEntered(MouseEvent e) { btn.setBackground(new Color(60, 110, 220)); }
-                    @Override public void mouseExited(MouseEvent e) { btn.setBackground(new Color(40, 80, 180)); }
+                b.addMouseListener(new MouseAdapter() {
+                    @Override public void mouseEntered(MouseEvent e) { b.setBackground(new Color(60, 110, 220)); }
+                    @Override public void mouseExited(MouseEvent e) { b.setBackground(new Color(40, 80, 180)); }
                 });
             }
         }
     }
 
     /**
-     * Inicijalizira interne strukture za otključavanje i povijest promjena.
-     */
-    private void initUnlockHistoryData() {
-        odmrznutiModelRedovi = new HashSet<>();
-        povijestPromjena = new HashMap<>();
-    }
-    
-    
-
-    /**
-     * Resetira timer neaktivnosti.
-     */
-    
-    private void resetInactivityTimer() {
-        if (inactivityTimer != null) inactivityTimer.restart();
-    }
-
-    /**
      * Main metoda — ulazna točka aplikacije.
      */
-
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
             UserDatabaseHelper.initializeUserTable();
             new LoginUI();
         });
     }
+ // Unutar klase UI, dodaj ovu unutarnju klasu:
+    private static class DoubleClickTable extends JTable {
+        public DoubleClickTable(TableModel model) {
+            super(model);
+        }
+
+        // Override editCellAt to require double-click for mouse events
+        @Override
+        public boolean editCellAt(int row, int column, EventObject e) {
+            // If editing was started by a mouse event, require double-click
+            if (e instanceof MouseEvent) {
+                MouseEvent me = (MouseEvent) e;
+                if (me.getClickCount() < 2) {
+                    // do not start editing on single click
+                    return false;
+                }
+            }
+            // allow keyboard / programmatic editing
+            return super.editCellAt(row, column, e);
+        }
+        
+
+
+        // Also override processMouseEvent to avoid some look-and-feel shortcuts
+        // (optional) — but not necessary in most cases.
+    }
     
     
+    //metoda koja izračunava plan datum isporuke za sve redove na temelju datuma narudžbe izostavlja status "Izrađeno"  
+    // sa naznakom da kreće od prvog reda i dodaje datume u kolonu planDatumIsporuke i produžuje za već datum koji je naznačen u
+   // polju "daniZaIsporuku" jedan raed ili jedan artikal maksimalno 2800 m2, znači uzima prosjek m2 kapacitet po danu sum m2 sve šta ima status izrađeno i dijeli 
+// sa ukupnim m2 koje je za ozraditi odnosno koji nema status izrađeno. kapacitet se uzima iz baze naši da se zbroji sve što je m2 status izrađeno u posljednjih 30 dana
+    
+    
+    
+
+ // Computes planned delivery dates for all rows, skipping "Izrađeno".
+ // - Earliest date per row = datumNarudzbe + daniZaIsporuku (default 7 if column missing/blank).
+ // - Schedules rows sequentially (model order) across days.
+ // - Daily total capacity = average m2 completed over last 30 calendar days (from model/DB).
+ // - Per-article-per-day cap = 2800 m2 (one article cannot exceed 2800 m2 in a single day).
+ //   If article's m2 > 2800, it spans multiple days. The planned date becomes the last day needed.
+ // - Writes into "planDatumIsporuke" if it exists, otherwise falls back to "predDatumIsporuke".
+ // - Dates formatted as "dd.MM.yyyy".
+ // Replace or add these methods in UI.java (next to your other recompute helpers).
+ // Robust computePlanDatumIsporukeForAllRows() that handles Date/LocalDate/String values,
+ // writes into planDatumIsporuke (fallback predDatumIsporuke) and logs useful diagnostics.
+ // Replacement: compute with a minimum daily capacity fallback and detailed logging of updated rows.
+ // Novi computePlanDatumIsporukeForAllRows() s dodatnom dijagnostikom i fallback upisom
+ // Replace or add the following methods inside your UI class (UI.java).
+ // computePlanDatumIsporukeForAllRows ensures EDT, updates model values, fires per-row updates and scrolls to first updated row.
+
+ // Add these methods to your UI class (replace previous computePlanDatumIsporukeForAllRows and helpers).
+ // This version:
+ // - Uses a strict historical average: sum(m2 of "Izrađeno") in the last 30 WORKING days / 30
+ // - Scheduling starts from TODAY and never schedules on weekends or specified non-working days
+ // - One-article-per-day cap = 2800 m2
+ // - No arbitrary minimum fallback for avgDailyCapacity (but if avg==0 we log and fall back to per-article cap to avoid infinite loop)
+ // - Ensures EDT, fireTableRowsUpdated per updated row, and scrolls to the first updated visible row
+ //
+ // IMPORTANT: populate nonWorkingDaysSet with company holidays if needed (format LocalDate).
+ // By default only weekends are considered non-working.
+ private final java.util.Set<java.time.LocalDate> nonWorkingDaysSet = new java.util.HashSet<>(); // populate with holidays as needed
+
+//Replace computePlanDatumIsporukeForAllRows with this implementation (and include the helper methods below).
+//This implementation fills each working day up to avgDailyCapacity; per-article cap applies but remaining capacity can be used by other articles.
+
+
+
+//computePlanDatumIsporukeForAllRows - day-fill algorithm with sorted queue by earliest,
+//strict historical avg over last N working days, skip weekends and holidays,
+//per-article cap + shared daily capacity behaviour fixed.
+
+
+//import logic.WorkingTimeCalculator;  // dodaj na vrh datoteke ako nije već importano
+
+//computePlanDatumIsporukeForAllRows - fill each working day up to avgDailyCapacity before moving to next day.
+//Uses WorkingTimeCalculator for holidays/weekends. If allowStartBeforeEarliest==true the scheduler may
+//start orders before their earliest if needed to fill the day (set to false to forbid).
+//import logic.WorkingTimeCalculator; // dodaj na vrh klase ako nije importano
+
+//computePlanDatumIsporukeForAllRows - ista logika kao prethodno, ali dodan DIAG ispisi queue preview (prvih 30)
+ private void computePlanDatumIsporukeForAllRows() {
+	    // Ensure on EDT
+	    if (!javax.swing.SwingUtilities.isEventDispatchThread()) {
+	        javax.swing.SwingUtilities.invokeLater(() -> computePlanDatumIsporukeForAllRows());
+	        return;
+	    }
+
+	    System.out.println("Computing Plan Datum Isporuke (day-fill, per-article cap enforced, debug queue preview)...");
+
+	    int idxOrderDate = tableModel.findColumn("datumNarudzbe");
+	    int idxStatus = tableModel.findColumn("status");
+	    int idxM2 = tableModel.findColumn("m2");
+	    int idxDaniZaIsporuku = tableModel.findColumn("daniZaIsporuke");
+	    int idxPlanDatumIsporuke = tableModel.findColumn("planDatumIsporuke");
+	    int idxPred = tableModel.findColumn("predDatumIsporuke");
+
+	    if (idxPlanDatumIsporuke < 0) idxPlanDatumIsporuke = idxPred; // fallback
+
+	    if (idxOrderDate < 0 || idxStatus < 0 || idxM2 < 0 || idxPlanDatumIsporuke < 0) {
+	        System.out.printf("Cannot compute: missing columns order=%d status=%d m2=%d plan/fallback=%d%n",
+	                idxOrderDate, idxStatus, idxM2, idxPlanDatumIsporuke);
+	        return;
+	    }
+
+	    final int windowWorkingDays = 30;
+	    final double perArticleDailyCap = 2800.0;
+
+	    // Strict historical average
+	    double avgDailyCapacity = computeAverageDailyCapacityM2_LastNWorkingDays(windowWorkingDays);
+
+	    // >>> FORCED DAILY CAPACITY: change this to your target (e.g. 4424.01 or 4600.0).
+	    // If forcedDailyCapacity <= 0, code will use historical avgDailyCapacity.
+	    final double forcedDailyCapacity = 4424.01; // <- set desired daily throughput here
+
+	    if (avgDailyCapacity <= 0.0) {
+	        System.out.printf("Warning: historical avgDailyCapacity=%.2f (<=0).%n", avgDailyCapacity);
+	    }
+	    System.out.printf("DIAG: Overriding avgDailyCapacity %.2f -> forcedDailyCapacity %.2f m2/day%n",
+		        avgDailyCapacity, forcedDailyCapacity);
+		avgDailyCapacity = forcedDailyCapacity;
+
+	    final java.time.format.DateTimeFormatter outFmt = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy");
+	    final java.time.format.DateTimeFormatter[] parseFmts = new java.time.format.DateTimeFormatter[]{
+	            java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+	            java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+	            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+	    };
+
+	    int totalRows = tableModel.getRowCount();
+	    java.time.LocalDate today = java.time.LocalDate.now();
+
+	    // Build queue: row, remaining m2, earliest (normalized), assignedToday
+	    class Order {
+	        final int row;
+	        double remaining;
+	        java.time.LocalDate earliest;
+	        double assignedToday;
+	        Order(int row, double remaining, java.time.LocalDate earliest) {
+	            this.row = row; this.remaining = remaining; this.earliest = earliest; this.assignedToday = 0.0;
+	        }
+	    }
+	    java.util.List<Order> queue = new java.util.ArrayList<>();
+	    double totalRemaining = 0.0;
+
+	    for (int r = 0; r < totalRows; r++) {
+	        String status = safeString(tableModel.getValueAt(r, idxStatus));
+	        if ("izrađeno".equalsIgnoreCase(status) || "izradjeno".equalsIgnoreCase(status)) continue;
+
+	        Object orderObj = tableModel.getValueAt(r, idxOrderDate);
+	        java.time.LocalDate orderDate = parseLocalDateGeneric(orderObj);
+	        if (orderDate == null) orderDate = parseLocalDate(safeString(orderObj), parseFmts);
+	        if (orderDate == null) {
+	            tableModel.setValueAt("", r, idxPlanDatumIsporuke);
+	            continue;
+	        }
+
+	        int daniZaIsporuku = 7;
+	        if (idxDaniZaIsporuku >= 0) {
+	            daniZaIsporuku = parseIntOrDefault(tableModel.getValueAt(r, idxPlanDatumIsporuke), 7);
+	            if (daniZaIsporuku < 0) daniZaIsporuku = 0;
+	        }
+
+	        java.time.LocalDate earliest = orderDate.plusDays(daniZaIsporuku);
+	        double m2 = parseDoubleOrZero(tableModel.getValueAt(r, idxM2));
+	        if (m2 <= 0.0) {
+	            // set trivial plan on next working day >= earliest or today
+	            java.time.LocalDate candidate = earliest.isBefore(today) ? today : earliest;
+	            java.time.LocalDate plan = nextWorkingDay(candidate);
+	            tableModel.setValueAt(plan.format(outFmt), r, idxPlanDatumIsporuke);
+	            continue;
+	        }
+
+	        // normalize earliest: if in past, make it today (eligible immediately)
+	        if (earliest.isBefore(today)) earliest = today;
+
+	        queue.add(new Order(r, m2, earliest));
+	        totalRemaining += m2;
+	    }
+
+	    if (queue.isEmpty()) {
+	        tableModel.fireTableDataChanged();
+	        System.out.println("DIAG: No orders to schedule.");
+	        return;
+	    }
+
+	    // Sort queue by earliest then by row (stable)
+	    queue.sort((a, b) -> {
+	        int c = a.earliest.compareTo(b.earliest);
+	        if (c != 0) return c;
+	        return Integer.compare(a.row, b.row);
+	    });
+
+	    // DIAG: preview first 30 queue items to spot bad earliest/parsing
+	    System.out.println("DIAG: Queue preview (first 30 items):");
+	    int preview = Math.min(queue.size(), 30);
+	    for (int i = 0; i < preview; i++) {
+	        Order o = queue.get(i);
+	        System.out.printf("DIAG: [%d] row=%d remaining=%.2f earliest=%s%n", i, o.row, o.remaining, o.earliest.format(outFmt));
+	    }
+	    if (queue.size() > preview) System.out.printf("DIAG: ... (+%d more)%n", queue.size() - preview);
+	    System.out.printf("DIAG: totalRemaining=%.2f m2%n", totalRemaining);
+
+	    // Diagnostics
+	    java.time.LocalDate minEarliest = null, maxEarliest = null;
+	    for (Order o : queue) {
+	        if (minEarliest == null || o.earliest.isBefore(minEarliest)) minEarliest = o.earliest;
+	        if (maxEarliest == null || o.earliest.isAfter(maxEarliest)) maxEarliest = o.earliest;
+	    }
+	    double estimatedDays = totalRemaining / avgDailyCapacity;
+	    java.time.LocalDate expectedLast = addWorkingDays(today, Math.max(0, (int)Math.ceil(estimatedDays) - 1));
+	    System.out.printf("DIAG: queueSize=%d totalRemaining=%.2f estimatedDays=%.2f earliestRange=[%s..%s] expectedLast=%s%n",
+	            queue.size(), totalRemaining, estimatedDays,
+	            (minEarliest==null ? "<none>" : minEarliest.format(outFmt)),
+	            (maxEarliest==null ? "<none>" : maxEarliest.format(outFmt)),
+	            (expectedLast==null ? "<none>" : expectedLast.format(outFmt)));
+
+	    // Scheduler policy: allow using orders even if earliest > currentDay to fill the day.
+	    boolean allowStartBeforeEarliest = true;
+
+	    // Scheduling loop: for each working day, keep assigning until day's capacity is (nearly) exhausted.
+	    java.util.List<Integer> updatedRows = new java.util.ArrayList<>();
+	    boolean[] planSet = new boolean[totalRows];
+	    int remainingOrders = 0;
+	    for (Order o : queue) if (o.remaining > 0) remainingOrders++;
+
+	    java.time.LocalDate currentDay = nextWorkingDay(today);
+	    int daysUsed = 0;
+	    int safetyDaysLeft = 365 * 5; // safety guard
+	    final double EPS = 1e-6;
+
+	    while (remainingOrders > 0 && safetyDaysLeft-- > 0) {
+	        // ensure currentDay is working
+	        if (!isWorkingDay(currentDay)) { currentDay = nextWorkingDay(currentDay.plusDays(1)); continue; }
+
+	        // reset per-article assignedToday at start of this day
+	        for (Order o : queue) o.assignedToday = 0.0;
+
+	        // dayRemaining starts as avgDailyCapacity
+	        double dayRemaining = avgDailyCapacity;
+	        boolean anyAssignedThisDay = false;
+
+	        // Try to fill the day completely: loop until dayRemaining ~ 0 or we can't assign anything more this day
+	        while (dayRemaining > EPS) {
+	            // find next order to assign:
+	            // prefer orders with earliest <= currentDay (eligible) in queue order and that still have per-day capacity
+	            Order pick = null;
+	            for (Order o : queue) {
+	                if (o.remaining > EPS && !currentDay.isBefore(o.earliest) && (o.assignedToday + EPS) < perArticleDailyCap) {
+	                    pick = o;
+	                    break;
+	                }
+	            }
+	            // if none eligible and policy allows, pick next available order regardless of earliest, but only if it still has per-day capacity
+	            if (pick == null && allowStartBeforeEarliest) {
+	                for (Order o : queue) {
+	                    if (o.remaining > EPS && (o.assignedToday + EPS) < perArticleDailyCap) {
+	                        pick = o;
+	                        break;
+	                    }
+	                }
+	            }
+	            // if still none, break (no assignable orders left today)
+	            if (pick == null) break;
+
+	            // compute how much this article can still get this day
+	            double canForArticle = Math.max(0.0, perArticleDailyCap - pick.assignedToday);
+	            double assign = Math.min(pick.remaining, Math.min(canForArticle, dayRemaining));
+	            if (assign <= EPS) break;
+
+	            // assign
+	            pick.remaining -= assign;
+	            pick.assignedToday += assign;
+	            dayRemaining -= assign;
+	            anyAssignedThisDay = true;
+
+	            // if finished, set plan to currentDay
+	            if (pick.remaining <= EPS) {
+	                tableModel.setValueAt(currentDay.format(outFmt), pick.row, idxPlanDatumIsporuke);
+	                planSet[pick.row] = true;
+	                updatedRows.add(pick.row);
+	                remainingOrders--;
+	            }
+	            // else residual remains for next days
+	        } // end filling day
+
+	        if (anyAssignedThisDay) daysUsed++;
+
+	        // If we couldn't assign anything this day, jump to next earliest remaining order's earliest (if any)
+	        if (!anyAssignedThisDay) {
+	            java.time.LocalDate nextEarliest = null;
+	            for (Order o : queue) {
+	                if (o.remaining > EPS) {
+	                    if (nextEarliest == null || o.earliest.isBefore(nextEarliest)) nextEarliest = o.earliest;
+	                }
+	            }
+	            if (nextEarliest == null) break; // nothing left
+	            currentDay = nextWorkingDay(nextEarliest);
+	        } else {
+	            // move to next working day
+	            currentDay = nextWorkingDay(currentDay.plusDays(1));
+	        }
+	    } // end scheduling loop
+
+	    // Fallback: any remaining orders -> set to next working day >= earliest or today
+	    int fallbackAssigned = 0;
+	    for (Order o : queue) {
+	        if (planSet[o.row]) continue;
+	        if (o.remaining <= EPS) continue;
+	        java.time.LocalDate candidate = o.earliest.isBefore(today) ? today : o.earliest;
+	        java.time.LocalDate plan = nextWorkingDay(candidate);
+	        tableModel.setValueAt(plan.format(outFmt), o.row, idxPlanDatumIsporuke);
+	        fallbackAssigned++;
+	        updatedRows.add(o.row);
+	    }
+
+	    // Fire updates for changed rows
+	    for (int rr : updatedRows) {
+	        try { tableModel.fireTableRowsUpdated(rr, rr); } catch (Exception ignored) {}
+	    }
+	    table.repaint();
+
+	    // determine last scheduled date (max over all plan dates we wrote)
+	    java.time.LocalDate lastScheduled = null;
+	    for (int r : updatedRows) {
+	        String s = safeString(tableModel.getValueAt(r, idxPlanDatumIsporuke));
+	        java.time.LocalDate d = parseLocalDateGeneric(s);
+	        if (d == null) d = parseLocalDate(s, parseFmts);
+	        if (d != null) {
+	            if (lastScheduled == null || d.isAfter(lastScheduled)) lastScheduled = d;
+	        }
+	    }
+
+	    System.out.printf("DIAG: Scheduling complete: queueSize=%d scheduled=%d fallbackAssigned=%d daysUsed=%d lastScheduled=%s%n",
+	            queue.size(), updatedRows.size(), fallbackAssigned, daysUsed, (lastScheduled == null ? "<none>" : lastScheduled.format(outFmt)));
+	}
+
+//--- helper methods using WorkingTimeCalculator (paste these into the same class if not present) ---
+
+private boolean isWorkingDay(java.time.LocalDate day) {
+  if (day == null) return false;
+  // working day = NOT (weekend OR holiday)
+  return !WorkingTimeCalculator.isHolidayOrWeekend(day);
+}
+
+private java.time.LocalDate nextWorkingDay(java.time.LocalDate day) {
+  if (day == null) return null;
+  java.time.LocalDate d = day;
+  while (!isWorkingDay(d)) d = d.plusDays(1);
+  return d;
+}
+
+//Helper: addWorkingDays(start, workDays)
+//Moves forward from 'start' by 'workDays' working days (skips weekends and holidays).
+//If workDays == 0 returns start.
+private java.time.LocalDate addWorkingDays(java.time.LocalDate start, int workDays) {
+  if (start == null) return null;
+  if (workDays <= 0) return start;
+  java.time.LocalDate d = start;
+  int added = 0;
+  int safety = 0;
+  while (added < workDays && safety++ < 365*10) {
+      d = d.plusDays(1);
+      if (isWorkingDay(d)) {
+          added++;
+      }
+  }
+  return d;
+}
+
+//computeAverageDailyCapacityM2_LastNWorkingDays: strict historical average
+private double computeAverageDailyCapacityM2_LastNWorkingDays(int lastN) {
+  int idxStatus = tableModel.findColumn("status");
+  int idxM2 = tableModel.findColumn("m2");
+  int idxEnd = tableModel.findColumn("endTime");
+  int idxPred = tableModel.findColumn("predDatumIsporuke");
+  int idxNar = tableModel.findColumn("datumNarudzbe");
+
+  if (idxStatus < 0 || idxM2 < 0) return 0.0;
+
+  java.time.LocalDate today = java.time.LocalDate.now();
+
+  // find startInclusive by walking back calendar days until we've counted lastN working days
+  int counted = 0;
+  java.time.LocalDate cursor = today;
+  java.time.LocalDate startInclusive = today;
+  while (counted < lastN) {
+      if (isWorkingDay(cursor)) counted++;
+      if (counted >= lastN) { startInclusive = cursor; break; }
+      cursor = cursor.minusDays(1);
+  }
+
+  double total = 0.0;
+  for (int r = 0; r < tableModel.getRowCount(); r++) {
+      String status = safeString(tableModel.getValueAt(r, idxStatus));
+      if (!"izrađeno".equalsIgnoreCase(status) && !"izradjeno".equalsIgnoreCase(status)) continue;
+      double m2 = parseDoubleOrZero(tableModel.getValueAt(r, idxM2));
+      if (m2 <= 0.0) continue;
+      java.time.LocalDate doneDay = null;
+      if (idxEnd >= 0) doneDay = parseLocalDateFromDateTime(safeString(tableModel.getValueAt(r, idxEnd)));
+      if (doneDay == null && idxPred >= 0) doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxPred)),
+              new java.time.format.DateTimeFormatter[]{
+                      java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+              });
+      if (doneDay == null && idxNar >= 0) doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxNar)),
+              new java.time.format.DateTimeFormatter[]{
+                      java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                      java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+              });
+      if (doneDay == null) continue;
+      if ((!doneDay.isBefore(startInclusive)) && (!doneDay.isAfter(today))) {
+          total += m2;
+      }
+  }
+  return total / Math.max(1, lastN);
+}
+
+//Helpers: working day checks and parsers
+
+
+private static String safeString(Object o) { return o == null ? "" : o.toString().trim(); }
+
+private static java.time.LocalDate parseLocalDate(String s, java.time.format.DateTimeFormatter[] fmts) { if (s == null || s.isBlank()) return null; for (java.time.format.DateTimeFormatter f : fmts) try { return java.time.LocalDate.parse(s.trim(), f); } catch (Exception ignored) {} return null; }
+private static java.time.LocalDate parseLocalDateFromDateTime(String s) { if (s == null || s.isBlank()) return null; String t = s.trim(); java.time.format.DateTimeFormatter[] fmts = new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy") }; for (java.time.format.DateTimeFormatter f : fmts) try { java.time.temporal.TemporalAccessor ta = f.parse(t); if (ta.query(java.time.temporal.TemporalQueries.localDate()) != null) return java.time.LocalDate.from(ta); } catch (Exception ignored) {} return parseLocalDate(t, new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd") }); }
+private static java.time.LocalDate parseLocalDateGeneric(Object o) { if (o == null) return null; if (o instanceof java.time.LocalDate) return (java.time.LocalDate) o; if (o instanceof java.sql.Date) return ((java.sql.Date) o).toLocalDate(); if (o instanceof java.util.Date) { java.util.Date d = (java.util.Date) o; return d.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate(); } if (o instanceof Number) { long v = ((Number) o).longValue(); try { return java.time.Instant.ofEpochMilli(v).atZone(java.time.ZoneId.systemDefault()).toLocalDate(); } catch (Exception ignored) {} } String s = o.toString().trim(); if (s.isEmpty()) return null; java.time.format.DateTimeFormatter[] fmts = new java.time.format.DateTimeFormatter[]{ java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"), java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"), java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd"), java.time.format.DateTimeFormatter.ISO_LOCAL_DATE }; return parseLocalDate(s, fmts); }
+
+//computeAverageDailyCapacityM2_LastNWorkingDays: strict historical average
+
+
+//Helpers: working day checks + date parsing
+
+
+ // Compute strict historical average: sum(m2 of rows with status "Izrađeno" whose done day is within the lastN working days window) / lastN
+ // lastN is number of working days (e.g., 30). We find the start date by walking back calendar days until we've counted lastN working days.
+
+
+
+
+//Compute strict historical average over lastN WORKING days (walk back calendar days until lastN working days counted,
+//sum m2 for rows with status "Izrađeno" whose done day in [startInclusive .. today], divide by lastN).
+
+
+//Helpers: working day checks and date parsing
+
+
+ // Helper: compute average daily capacity m2 from last N days (calendar days).
+ private double computeAverageDailyCapacityM2FromModel(int lastNDays) {
+     int idxStatus = tableModel.findColumn("status");
+     int idxM2 = tableModel.findColumn("m2");
+     int idxEnd = tableModel.findColumn("endTime");
+     int idxPred = tableModel.findColumn("predDatumIsporuke");
+     int idxNar = tableModel.findColumn("datumNarudzbe");
+
+     if (idxStatus < 0 || idxM2 < 0) return 0.0;
+
+     LocalDate today = LocalDate.now();
+     LocalDate start = today.minusDays(Math.max(1, lastNDays) - 1);
+
+     double total = 0.0;
+     for (int r = 0; r < tableModel.getRowCount(); r++) {
+         String status = safeString(tableModel.getValueAt(r, idxStatus));
+         if (!"izrađeno".equalsIgnoreCase(status) && !"izradjeno".equalsIgnoreCase(status)) continue;
+
+         double m2 = parseDoubleOrZero(tableModel.getValueAt(r, idxM2));
+         if (m2 <= 0.0) continue;
+
+         LocalDate doneDay = null;
+         if (idxEnd >= 0) {
+             doneDay = parseLocalDateFromDateTime(safeString(tableModel.getValueAt(r, idxEnd)));
+         }
+         if (doneDay == null && idxPred >= 0) {
+             doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxPred)),
+                     new java.time.format.DateTimeFormatter[] {
+                             java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                     });
+         }
+         if (doneDay == null && idxNar >= 0) {
+             doneDay = parseLocalDate(safeString(tableModel.getValueAt(r, idxNar)),
+                     new java.time.format.DateTimeFormatter[] {
+                             java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+                             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+                     });
+         }
+         if (doneDay == null) continue;
+
+         if (!doneDay.isBefore(start) && !doneDay.isAfter(today)) {
+             total += m2;
+         }
+     }
+
+     return total / Math.max(1, lastNDays);
+ }
+
+ // ===== utility helpers =====
+
+
+
+ // showColumn helper: attempt to unhide a model column in the JTable view
+
+ // Helper: compute average daily capacity m2 from last N days (calendar days).
+ // Sums m2 of rows with status "Izrađeno" whose completion date (endTime/predDatumIsporuke/datumNarudzbe) falls in window,
+ // then divides by lastNDays.
+
+
+ // ===== utility helpers =====
+
+
+
+ // Try parse string with provided formatters
+
+ // Parse date/time strings like "dd.MM.yyyy HH:mm" -> return LocalDate part
+
+ // Generic parser: handles LocalDate, java.util.Date, java.sql.Date, String
+
+ // Computes average daily capacity (m2/day) from last N calendar days.
+ // Logic: sum m2 for rows with status "Izrađeno" whose completion date falls within the window,
+ // then divide by N (calendar days). Preferred completion date is endTime (date part),
+ // fallback to predDatumIsporuke, fallback to datumNarudzbe.
+
+
+ // ===== Helpers =====
+
+
+ 
+
+
+ // Parses "dd.MM.yyyy HH:mm" or similar; returns only the date part.
+
+
+//DIJAGNOSTIKA: ispisi zaglavlja modela i mapping na view
+private void debugPrintTableModelInfo() {
+  System.out.println("DEBUG: tableModel rowCount=" + tableModel.getRowCount() + " colCount=" + tableModel.getColumnCount());
+  for (int i = 0; i < tableModel.getColumnCount(); i++) {
+      String name = tableModel.getColumnName(i);
+      int viewIdx = table.convertColumnIndexToView(i); // -1 ako nije u view (skrivena)
+      System.out.printf("  modelIdx=%d name='%s' viewIdx=%d%n", i, name, viewIdx);
+  }
+  // provjeri prvi red (ako ima)
+  if (tableModel.getRowCount() > 0) {
+      int idxPlan = tableModel.findColumn("planDatumIsporuke");
+      int idxPred = tableModel.findColumn("predDatumIsporuke");
+      System.out.println(" sample row0 plan=" + (idxPlan>=0 ? tableModel.getValueAt(0, idxPlan) : "<no plan col>") +
+                         " pred=" + (idxPred>=0 ? tableModel.getValueAt(0, idxPred) : "<no pred col>"));
+  }
+}
+
+//Poništi skrivenost kolone (ako je bila hideColumns postavom širine 0)
+private void showColumn(int modelIndex, int preferredWidth) {
+ int viewIndex = table.convertColumnIndexToView(modelIndex);
+ if (viewIndex >= 0) {
+     TableColumn col = table.getColumnModel().getColumn(viewIndex);
+     col.setMinWidth(15);
+     col.setPreferredWidth(preferredWidth);
+     col.setMaxWidth(Integer.MAX_VALUE);
+     col.setResizable(true);
+ } else {
+     // Ponekad može biti -1 ako je model/view neusklađen — pokušaj pronaći po imenu
+     String colName = tableModel.getColumnName(modelIndex);
+     for (int v = 0; v < table.getColumnModel().getColumnCount(); v++) {
+         if (table.getColumnModel().getColumn(v).getHeaderValue().toString().equals(colName)) {
+             TableColumn col = table.getColumnModel().getColumn(v);
+             col.setMinWidth(15);
+             col.setPreferredWidth(preferredWidth);
+             col.setMaxWidth(Integer.MAX_VALUE);
+             col.setResizable(true);
+             return;
+         }
+     }
+     System.out.println("showColumn: view index -1 and not found by header: " + colName);
+ }
+}
+
+    // --- Kraj klase ---
 }

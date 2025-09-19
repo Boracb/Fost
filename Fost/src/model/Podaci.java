@@ -3,15 +3,26 @@ package model;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import logic.DateUtils;
 
+/**
+ * Model Podaci - s dodatnim helperima za predviđeni plan isporuke.
+ * 
+ * Ovaj update zadržava sve stare značajke klase, a dodaje:
+ * - pomoćne metode za dobavljanje/podešavanje predPlanIsporuke kao String (format dd/MM/yyyy)
+ *   te fallback parsiranje pomoću DateUtils (ako je potrebno).
+ */
 public class Podaci {
 
-    private LocalDate datumNarudzbe; // ✅ Promijenjeno iz String u LocalDate
-    private LocalDate predDatumIsporuke; // ✅ Promijenjeno iz String u LocalDate
-    private KomitentInfo komitentInfo;    // ✅ Sada koristimo posebnu klasu umjesto 2 polja
+    private LocalDate datumNarudzbe; // datum narudžbe
+    private LocalDate predDatumIsporuke; // originalno predDatumIsporuke (ako postoji)
+    private LocalDate predPlanIsporuke; // NOVO: predviđeni plan isporuke
+    private KomitentInfo komitentInfo;    // info o komitentu
     private String nazivRobe; // Naziv robe
-    private double netoVrijednost; //
-    private int kom;// količina u komadima
+    private double netoVrijednost;
+    private int kom; // količina u komadima
     private String status; // status narudžbe
     private int mm; // milimetri
     private int m; // metri
@@ -20,14 +31,21 @@ public class Podaci {
     private LocalTime startTime; // vrijeme početka
     private LocalTime endTime; // vrijeme završetka
     private Duration duration; // trajanje
-    
-   
-    public Podaci(LocalDate datumNarudzbe, LocalDate predDatumIsporuke, KomitentInfo komitentInfo,
-                  String nazivRobe, double netoVrijednost, int kom, String status,
+    private String trgovackiPredstavnik;
+
+    private static final DateTimeFormatter OUT_DATE = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+    public Podaci() {
+    }
+
+    public Podaci(LocalDate datumNarudzbe, LocalDate predDatumIsporuke, LocalDate predPlanIsporuke,
+                  KomitentInfo komitentInfo, String nazivRobe, double netoVrijednost, int kom, String status,
                   int mm, int m, int tisucl, double m2,
-                  LocalTime startTime, LocalTime endTime, Duration duration) {
+                  LocalTime startTime, LocalTime endTime, Duration duration,
+                  String trgovackiPredstavnik) {
         this.datumNarudzbe = datumNarudzbe;
         this.predDatumIsporuke = predDatumIsporuke;
+        this.predPlanIsporuke = predPlanIsporuke;
         this.komitentInfo = komitentInfo;
         this.nazivRobe = nazivRobe;
         this.netoVrijednost = netoVrijednost;
@@ -40,6 +58,7 @@ public class Podaci {
         this.startTime = startTime;
         this.endTime = endTime;
         this.duration = duration;
+        this.trgovackiPredstavnik = trgovackiPredstavnik;
     }
 
     public LocalDate getDatumNarudzbe() { return datumNarudzbe; }
@@ -48,6 +67,60 @@ public class Podaci {
     public LocalDate getPredDatumIsporuke() { return predDatumIsporuke; }
     public void setPredDatumIsporuke(LocalDate predDatumIsporuke) { this.predDatumIsporuke = predDatumIsporuke; }
 
+    public LocalDate getPredPlanIsporuke() { return predPlanIsporuke; }
+    public void setPredPlanIsporuke(LocalDate predPlanIsporuke) { this.predPlanIsporuke = predPlanIsporuke; }
+
+    /**
+     * Vraća predPlanIsporuke formatirano kao dd/MM/yyyy ili prazan string ako null.
+     */
+    public String getPredPlanIsporukeString() {
+        return predPlanIsporuke == null ? "" : predPlanIsporuke.format(OUT_DATE);
+    }
+
+    /**
+     * Pokušava parsirati predPlanIsporuke iz raznih formata.
+     * Prihvaća dd/MM/yyyy, dd.MM.yyyy, yyyy-MM-dd i druge formate podržane u DateUtils.parse.
+     * Ako parsing ne uspije postavlja null.
+     */
+    public void setPredPlanIsporukeFromString(String s) {
+        if (s == null) {
+            this.predPlanIsporuke = null;
+            return;
+        }
+        String trimmed = s.trim();
+        if (trimmed.isEmpty()) {
+            this.predPlanIsporuke = null;
+            return;
+        }
+
+        // Prvo pokušaj lokalnog formata dd/MM/yyyy
+        try {
+            LocalDate ld = LocalDate.parse(trimmed, OUT_DATE);
+            this.predPlanIsporuke = ld;
+            return;
+        } catch (Exception ignored) {}
+
+        // Fallback: pokušaj parsiranja pomoću DateUtils (vrati LocalDateTime -> LocalDate)
+        try {
+            LocalDateTime dt = DateUtils.parse(trimmed);
+            if (dt != null) {
+                this.predPlanIsporuke = dt.toLocalDate();
+                return;
+            }
+        } catch (Exception ignored) {}
+
+        // Ako ništa ne radi, pokušaj još sa ISO formatom
+        try {
+            LocalDate ldIso = LocalDate.parse(trimmed);
+            this.predPlanIsporuke = ldIso;
+        } catch (Exception ignored) {
+            this.predPlanIsporuke = null;
+        }
+    }
+   //ovdje dodaj planDatumIsporukeString i setPlanDatumIsporukeFromString
+    
+   
+    
     public KomitentInfo getKomitentInfo() { return komitentInfo; }
     public void setKomitentInfo(KomitentInfo komitentInfo) { this.komitentInfo = komitentInfo; }
 
@@ -84,11 +157,61 @@ public class Podaci {
     public Duration getDuration() { return duration; }
     public void setDuration(Duration duration) { this.duration = duration; }
 
+    public String getTrgovackiPredstavnik() { return trgovackiPredstavnik; }
+    public void setTrgovackiPredstavnik(String trgovackiPredstavnik) { this.trgovackiPredstavnik = trgovackiPredstavnik; }
+
+   //motoda planDatumIsporukeString i setPlanDatumIsporukeFromString
+	public String getPredDatumIsporukeString() {
+		return predDatumIsporuke == null ? "" : predDatumIsporuke.format(OUT_DATE);
+	}
+	
+	public void setPredDatumIsporukeFromString(String s) {	
+		if (s == null) {
+			this.predDatumIsporuke = null;
+			return;
+		}
+		String trimmed = s.trim();
+		if (trimmed.isEmpty()) {
+			this.predDatumIsporuke = null;
+			return;
+		}
+
+		// Prvo pokušaj lokalnog formata dd/MM/yyyy
+		try {
+			LocalDate ld = LocalDate.parse(trimmed, OUT_DATE);
+			this.predDatumIsporuke = ld;
+			return;
+		} catch (Exception ignored) {
+		}
+
+		// Fallback: pokušaj parsiranja pomoću DateUtils (vrati LocalDateTime ->
+		// LocalDate)
+		try {
+			LocalDateTime dt = DateUtils.parse(trimmed);
+			if (dt != null) {
+				this.predDatumIsporuke = dt.toLocalDate();
+				return;
+			}
+		} catch (Exception ignored) {
+		}
+
+		// Ako ništa ne radi, pokušaj još sa ISO formatom
+		try {
+			LocalDate ldIso = LocalDate.parse(trimmed);
+			this.predDatumIsporuke = ldIso;
+		} catch (Exception ignored) {
+			this.predDatumIsporuke = null;
+		}
+	}
+   
+    
+    
     @Override
     public String toString() {
         return "Podaci{" +
                 "datumNarudzbe=" + datumNarudzbe +
                 ", predDatumIsporuke=" + predDatumIsporuke +
+                ", predPlanIsporuke=" + predPlanIsporuke +
                 ", komitentInfo=" + komitentInfo +
                 ", nazivRobe='" + nazivRobe + '\'' +
                 ", netoVrijednost=" + netoVrijednost +
@@ -101,6 +224,8 @@ public class Podaci {
                 ", startTime=" + startTime +
                 ", endTime=" + endTime +
                 ", duration=" + duration +
+                "planDatumIsporuke='" + getPredPlanIsporukeString() + '\'' +
+                ", trgovackiPredstavnik='" + trgovackiPredstavnik + '\'' +
                 '}';
     }
 }

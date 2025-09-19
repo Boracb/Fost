@@ -6,8 +6,6 @@ import java.util.Objects;
  * 📄 Model klasa "KomitentInfo"
  * Predstavlja osnovne podatke o komitentu i pripadajućem trgovačkom predstavniku.
  */
-
-// --- Polja klase ---
 public class KomitentInfo {
 
     private String komitentOpis;         // 🏢 Opis komitenta
@@ -50,7 +48,6 @@ public class KomitentInfo {
     }
 
     @Override
-    
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof KomitentInfo)) return false;

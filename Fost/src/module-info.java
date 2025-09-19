@@ -10,8 +10,9 @@ module Fost {
 	requires poi;
 	requires poi.ooxml;
 	requires jcalendar;
-
+    requires commons.math3;
 	
 
 	
 }
+
