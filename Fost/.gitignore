@@ -1,2 +1,3 @@
 /bin/
--e "/Fost/Fost/user.actions.log\n/Fost/fost.db" 
+/Fost/user.actions.log
+/fost.db
