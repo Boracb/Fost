@@ -31,8 +31,6 @@ import java.util.*;
 import java.util.regex.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.io.File;
-import excel.ProducedExcelReader; // koristi čitač Excela iz paketa excel
-import model.ProducedExcelRow;    // DTO redaka iz Excela
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.io.File;
 
@@ -389,8 +387,7 @@ public class UI {
             ActionLogger.log(prijavljeniKorisnik, "Uvezao komitente iz tablice, dodano: " + added);
         });
         
-        JButton btnPlanObrtaj = new JButton("Plan nabave (obrtaj)");
-        btnPlanObrtaj.addActionListener(e -> new InventoryTurnoverDialog(frame).setVisible(true));
+     
 
         bottom.add(btnImport);
         bottom.add(btnMarkProduced);
@@ -400,7 +397,7 @@ public class UI {
         bottom.add(btnRefresh);
         bottom.add(btnDelete);
         bottom.add(btnImportKomitenti);
-        bottom.add(btnPlanObrtaj);
+
 
         applyBrutalButtonStyle(bottom);
 
@@ -676,18 +673,7 @@ public class UI {
             try { TableCellEditor ed = table.getCellEditor(); if (ed != null) ed.stopCellEditing(); } catch (Exception ignored) {}
         }
 
-        File f = fc.getSelectedFile();
-        java.util.List<ProducedExcelRow> excelRows;
-        try {
-            excelRows = ProducedExcelReader.read(f);
-        } catch (Exception ex) {
-            JOptionPane.showMessageDialog(frame, "Greška pri čitanju Excela: " + ex.getMessage(), "Greška", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-        if (excelRows == null || excelRows.isEmpty()) {
-            JOptionPane.showMessageDialog(frame, "Excel je prazan ili neprepoznat.", "Obavijest", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
+       
 
         // Mapiranja kolona po nazivu (otpornost na raspored)
         int idxKomitent = safeFindCol("komitentOpis", 2);
@@ -706,48 +692,7 @@ public class UI {
         int notMatched = 0;
 
         // Ključ: podudaranje SAMO po komitentOpis + nazivRobe
-        for (ProducedExcelRow r : excelRows) {
-            String kKomitent = normalize(r.getKomitentOpis());
-            String kNaziv    = normalize(r.getNazivRobe());
 
-            // pronađi sve podudarne redove
-            java.util.List<Integer> matches = new java.util.ArrayList<>();
-            for (int i = 0; i < tableModel.getRowCount(); i++) {
-                String mKomitent = normalize(Objects.toString(tableModel.getValueAt(i, idxKomitent), ""));
-                String mNaziv    = normalize(Objects.toString(tableModel.getValueAt(i, idxNaziv), ""));
-                if (mKomitent.equals(kKomitent) && mNaziv.equals(kNaziv)) {
-                    matches.add(i);
-                }
-            }
-
-            if (matches.isEmpty()) {
-                notMatched++;
-                continue;
-            }
-
-            // pokušaj prvi koji NIJE "Izrađeno"
-            int target = -1;
-            boolean allDone = true;
-            for (int rowIdx : matches) {
-                String mStatus = Objects.toString(tableModel.getValueAt(rowIdx, idxStatus), "");
-                boolean isDone = "Izrađeno".equalsIgnoreCase(mStatus) || "Izradjeno".equalsIgnoreCase(mStatus);
-                if (!isDone) {
-                    target = rowIdx;
-                    allDone = false;
-                    break;
-                }
-            }
-
-            if (target >= 0) {
-                tableModel.setValueAt("Izrađeno", target, idxStatus);
-                if (tableModel instanceof AbstractTableModel atm) atm.fireTableRowsUpdated(target, target);
-                marked++;
-            } else if (allDone) {
-                already++;
-            } else {
-                notMatched++;
-            }
-        }
 
         // osvježi prikaz
         table.repaint();
@@ -759,11 +704,7 @@ public class UI {
             JOptionPane.showMessageDialog(frame, "Greška pri spremanju u bazu: " + ex.getMessage(), "Greška", JOptionPane.ERROR_MESSAGE);
         }
 
-        String msg = "Stavki u Excelu: " + excelRows.size()
-                + "\nOznačeno 'Izrađeno': " + marked
-                + "\nVeć su bile 'Izrađeno': " + already
-                + "\nNije pronađeno u tablici: " + notMatched;
-        JOptionPane.showMessageDialog(frame, msg, "Rezultat označavanja", JOptionPane.INFORMATION_MESSAGE);
+     
     }
 
     private int safeFindCol(String name, int fallback) {
