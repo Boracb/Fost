@@ -1,7 +1,11 @@
 package ui;
 
-import dao.*;
+import dao.ConnectionProvider;
+import dao.InventoryDao;
+import dao.ProductDao;
+import dao.ProductGroupDao;
 import excel.ExcelProductInventoryReader;
+import model.Product;
 import model.ProductInventoryView;
 import service.ImportService;
 import service.InventoryService;
@@ -23,13 +27,18 @@ public class ProductInventoryPanel extends JPanel {
     private final InventoryService inventoryService;
     private final ImportService importService;
 
+    // DAO polja za uređivanje iz dijaloga
+    private final ProductDao productDao;
+    private final InventoryDao invDao;
+    private final ProductGroupDao groupDao;
+
     public ProductInventoryPanel(String dbUrl) {
         setLayout(new BorderLayout());
 
         var cp = new ConnectionProvider(dbUrl);
-        var productDao = new ProductDao(cp);
-        var invDao = new InventoryDao(cp);
-        var groupDao = new ProductGroupDao(cp);
+        this.productDao = new ProductDao(cp);
+        this.invDao = new InventoryDao(cp);
+        this.groupDao = new ProductGroupDao(cp);
 
         this.inventoryService = new InventoryService(invDao, productDao);
 
@@ -49,12 +58,24 @@ public class ProductInventoryPanel extends JPanel {
         JButton btnFilterGroup = new JButton("Filter grupa...");
         JButton btnTotal = new JButton("Ukupna vrijednost");
 
+        // Novi gumbi za uređivanje
+        JButton btnEdit = new JButton("Uredi proizvod…");
+        JButton btnGroups = new JButton("Grupe…");
+        JButton btnQty = new JButton("Količina/Cijena…");
+        JButton btnSupplier = new JButton("Postavi dobavljača…");
+
         top.add(btnReload);
         top.add(btnImport);
         top.add(btnSortSupplier);
         top.add(btnSortValue);
         top.add(btnFilterGroup);
         top.add(btnTotal);
+
+        // Dodaj nove gumbe
+        top.add(btnEdit);
+        top.add(btnGroups);
+        top.add(btnQty);
+        top.add(btnSupplier);
 
         add(top, BorderLayout.NORTH);
 
@@ -64,6 +85,12 @@ public class ProductInventoryPanel extends JPanel {
         btnSortValue.addActionListener(e -> sortByValue());
         btnFilterGroup.addActionListener(e -> filterByGroupDialog());
         btnTotal.addActionListener(e -> showTotalValue());
+
+        // Nove akcije za uređivanje
+        btnEdit.addActionListener(e -> editSelectedProduct());
+        btnGroups.addActionListener(e -> editSelectedGroups());
+        btnQty.addActionListener(e -> adjustSelectedQuantity());
+        btnSupplier.addActionListener(e -> setSelectedSupplier());
 
         reload();
     }
@@ -131,6 +158,97 @@ public class ProductInventoryPanel extends JPanel {
                     "Suma", JOptionPane.INFORMATION_MESSAGE);
         } catch (Exception ex) {
             showError("Ne mogu izračunati: " + ex.getMessage(), ex);
+        }
+    }
+
+    // --- NOVO: pomoćne metode za uređivanje ---
+
+    private ProductInventoryView getSelectedView() {
+        int row = table.getSelectedRow();
+        if (row < 0) return null;
+        int modelRow = table.convertRowIndexToModel(row);
+        return tableModel.getAt(modelRow);
+    }
+
+    private void editSelectedProduct() {
+        var v = getSelectedView();
+        if (v == null) { JOptionPane.showMessageDialog(this, "Odaberi red."); return; }
+        Product p = v.getProduct();
+        Window owner = SwingUtilities.getWindowAncestor(this);
+        EditProductDialog dlg = new EditProductDialog(owner, productDao, p);
+        dlg.setVisible(true);
+        reload();
+    }
+
+    private void editSelectedGroups() {
+        var v = getSelectedView();
+        if (v == null) { JOptionPane.showMessageDialog(this, "Odaberi red."); return; }
+        Window owner = SwingUtilities.getWindowAncestor(this);
+        ManageProductGroupsDialog dlg =
+                new ManageProductGroupsDialog(owner, groupDao, v.getProduct().getProductCode(), v.getGroupCodes());
+        dlg.setVisible(true);
+        reload();
+    }
+
+    private void adjustSelectedQuantity() {
+        var v = getSelectedView();
+        if (v == null) { JOptionPane.showMessageDialog(this, "Odaberi red."); return; }
+        String code = v.getProduct().getProductCode();
+
+        String qtyStr = JOptionPane.showInputDialog(this, "Nova količina (base):", v.getInventory().getQuantity());
+        if (qtyStr == null) return;
+        Double qty;
+        try {
+            qty = Double.valueOf(qtyStr.trim());
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "Neispravan broj.");
+            return;
+        }
+
+        String priceStr = JOptionPane.showInputDialog(this, "Jedinična nabavna cijena (enter za zadržati):",
+                v.getProduct().getPurchaseUnitPrice() == null ? "" : v.getProduct().getPurchaseUnitPrice().toString());
+        Double price = null;
+        if (priceStr != null && !priceStr.trim().isEmpty()) {
+            try {
+                price = Double.valueOf(priceStr.trim());
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "Neispravan broj za cijenu.");
+                return;
+            }
+        }
+        try {
+            invDao.upsertQuantity(code, qty, price);
+            reload();
+        } catch (Exception ex) {
+            showError("Spremanje nije uspjelo: " + ex.getMessage(), ex);
+        }
+    }
+
+    private void setSelectedSupplier() {
+        var v = getSelectedView();
+        if (v == null) { JOptionPane.showMessageDialog(this, "Odaberi red."); return; }
+        String current = v.getProduct().getSupplierCode();
+        String sup = JOptionPane.showInputDialog(this, "Dobavljač (code):", current == null ? "" : current);
+        if (sup == null) return;
+        try {
+            Product p = v.getProduct();
+            Product updated = new Product(
+                    p.getProductCode(),
+                    p.getName(),
+                    p.getMainType(),
+                    sup.trim().isEmpty() ? null : sup.trim(),
+                    p.getBaseUnit(),
+                    p.getAltUnit(),
+                    p.getAreaPerPiece(),
+                    p.getPackSize(),
+                    p.getMinOrderQty(),
+                    p.getPurchaseUnitPrice(),
+                    p.isActive()
+            );
+            productDao.upsert(updated);
+            reload();
+        } catch (Exception ex) {
+            showError("Spremanje dobavljača nije uspjelo: " + ex.getMessage(), ex);
         }
     }
 
