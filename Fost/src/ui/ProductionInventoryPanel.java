@@ -1,18 +1,11 @@
 package ui;
 
-import dao.ConnectionProvider;
-import dao.InventoryDao;
-import dao.ProductDao;
-import dao.ProductGroupDao;
+import dao.*;
 import excel.ExcelProductInventoryReader;
 import model.ProductInventoryView;
 import service.ImportService;
 import service.InventoryService;
-
 import javax.swing.*;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
-import javax.swing.table.TableRowSorter;
 import java.awt.*;
 import java.io.File;
 import java.sql.SQLException;
@@ -24,22 +17,7 @@ import java.util.Optional;
 import java.util.function.Predicate;
 
 /**
- * ProductionInventoryPanel
- *
- * Feature-rich inventory UI panel for production planning / stock monitoring.
- * Provides:
- *  - Reload data
- *  - Excel import
- *  - Sorting (supplier, total value)
- *  - Text search (code or name)
- *  - Group filtering
- *  - Quantity adjustments (+ / - / set)
- *  - Total value display
- *
- * Depends on ProductInventoryTableModel methods:
- *   setData(List), applyFilter(Predicate), sortBy(Comparator), getAt(int)
- * and ProductInventoryView methods:
- *   getProduct(), getInventory(), getGroupCodes(), getTotalValue()
+ * Prošireni panel (dodani dobavljači, obrtaj, narudžbe).
  */
 public class ProductionInventoryPanel extends JPanel {
 
@@ -49,22 +27,34 @@ public class ProductionInventoryPanel extends JPanel {
     private final InventoryService inventoryService;
     private final ImportService importService;
 
-    // Current filter state
+    // NEW: Procurement
+    private final procurementService procurementService;
+    private final ProductSupplierDao productSupplierDao;
+    private final SupplierDao supplierDao;
+
+    private final ConnectionProvider cp;
+
+    // Filtri
     private Predicate<ProductInventoryView> activePredicate = v -> true;
     private String activeGroupFilter = null;
     private String activeSearchText = "";
 
-    private final JTextField txtSearch = new JTextField(16);
+    private final JTextField txtSearch = new JTextField(14);
     private final JLabel lblStatus = new JLabel(" ");
-    private final NumberFormat nf = NumberFormat.getNumberInstance(new Locale("hr", "HR"));
+    private final NumberFormat nf = NumberFormat.getNumberInstance(new Locale("hr","HR"));
+
+    // NEW period combo
+    private final JComboBox<String> cmbPeriod = new JComboBox<>(new String[]{"1M","3M","6M","12M"});
 
     public ProductionInventoryPanel(String dbUrl) {
         setLayout(new BorderLayout());
 
-        var cp = new ConnectionProvider(dbUrl);
+        this.cp = new ConnectionProvider(dbUrl);
         var productDao = new ProductDao(cp);
         var invDao = new InventoryDao(cp);
         var groupDao = new ProductGroupDao(cp);
+        this.productSupplierDao = new ProductSupplierDao(cp);
+        this.supplierDao = new SupplierDao(cp);
 
         this.inventoryService = new InventoryService(invDao, productDao);
 
@@ -74,15 +64,13 @@ public class ProductionInventoryPanel extends JPanel {
 
         this.importService = new ImportService(reader, productDao, invDao, groupDao);
 
-        // TABLE CONFIG
-        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        table.setFillsViewportHeight(true);
-        table.setRowSelectionAllowed(true);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        // NEW procurement service
+        this.procurementService = new procurementService(invDao,
+                new SalesDaoImpl(cp),
+                productSupplierDao);
 
-        // Optional additional Swing sorting (on top of model sorts)
-        TableRowSorter<ProductInventoryTableModel> sorter = new TableRowSorter<>(tableModel);
-        table.setRowSorter(sorter);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
 
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(buildToolbar(), BorderLayout.NORTH);
@@ -96,16 +84,23 @@ public class ProductionInventoryPanel extends JPanel {
         JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT));
 
         JButton btnReload = new JButton("Osvježi");
-        JButton btnImport = new JButton("Import Excel");
-        JButton btnSortSupplier = new JButton("Sort: Dobavljač");
-        JButton btnSortValue = new JButton("Sort: Vrijednost");
+        JButton btnImport = new JButton("Import");
+        JButton btnSortSupplier = new JButton("Sort Dobavljač");
+        JButton btnSortValue = new JButton("Sort Vrijednost");
         JButton btnFilterGroup = new JButton("Filter grupa");
         JButton btnClearFilter = new JButton("Poništi filter");
         JButton btnPlus = new JButton("+1");
         JButton btnMinus = new JButton("-1");
         JButton btnSetQty = new JButton("Postavi količinu");
-        JButton btnTotal = new JButton("Ukupna vrijednost");
+        JButton btnTotal = new JButton("Ukupno");
         JLabel lblSearch = new JLabel("Traži:");
+
+        // NEW
+        JButton btnSuppliers = new JButton("Dobavljači");
+        JButton btnAssign = new JButton("Dodjela dobavljača");
+        JButton btnTurnover = new JButton("Obrtaj");
+        JButton btnOrders = new JButton("Narudžbe");
+        JLabel lblPeriod = new JLabel("Period:");
 
         bar.add(btnReload);
         bar.add(btnImport);
@@ -120,6 +115,14 @@ public class ProductionInventoryPanel extends JPanel {
         bar.add(btnSetQty);
         bar.add(btnTotal);
 
+        // NEW group
+        bar.add(lblPeriod);
+        bar.add(cmbPeriod);
+        bar.add(btnTurnover);
+        bar.add(btnOrders);
+        bar.add(btnSuppliers);
+        bar.add(btnAssign);
+
         btnReload.addActionListener(e -> reload());
         btnImport.addActionListener(e -> importExcel());
         btnSortSupplier.addActionListener(e -> sortBySupplier());
@@ -131,21 +134,27 @@ public class ProductionInventoryPanel extends JPanel {
         btnSetQty.addActionListener(e -> setSelectedQuantity());
         btnTotal.addActionListener(e -> showTotalValue());
 
+        // NEW actions
+        btnSuppliers.addActionListener(e -> new SuppliersDialog(SwingUtilities.getWindowAncestor(this), cp).setVisible(true));
+        btnAssign.addActionListener(e -> openAssignDialog());
+        btnTurnover.addActionListener(e -> showTurnoverForSelected());
+        btnOrders.addActionListener(e -> generateOrders());
+
         return bar;
     }
 
     private JComponent buildStatusBar() {
         JPanel p = new JPanel(new BorderLayout());
         p.add(lblStatus, BorderLayout.WEST);
-        lblStatus.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+        lblStatus.setBorder(BorderFactory.createEmptyBorder(2,6,2,6));
         return p;
     }
 
     private void hookSearchField() {
-        txtSearch.getDocument().addDocumentListener(new DocumentListener() {
-            @Override public void insertUpdate(DocumentEvent e) { updateSearch(); }
-            @Override public void removeUpdate(DocumentEvent e) { updateSearch(); }
-            @Override public void changedUpdate(DocumentEvent e) { updateSearch(); }
+        txtSearch.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { updateSearch(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { updateSearch(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { updateSearch(); }
         });
     }
 
@@ -155,7 +164,7 @@ public class ProductionInventoryPanel extends JPanel {
     }
 
     private void filterByGroup() {
-        String g = JOptionPane.showInputDialog(this, "Unesi kod grupe (prazno = odustani):");
+        String g = JOptionPane.showInputDialog(this, "Unesi kod grupe:");
         if (g == null || g.isBlank()) return;
         activeGroupFilter = g.trim().toLowerCase(Locale.ROOT);
         applyCombinedFilter();
@@ -169,9 +178,9 @@ public class ProductionInventoryPanel extends JPanel {
     }
 
     private void applyCombinedFilter() {
-        Predicate<ProductInventoryView> p = v -> true;
+        java.util.function.Predicate<ProductInventoryView> p = v -> true;
 
-        if (activeSearchText != null && !activeSearchText.isBlank()) {
+        if (!activeSearchText.isBlank()) {
             String s = activeSearchText;
             p = p.and(v -> {
                 String code = Optional.ofNullable(v.getProduct().getProductCode()).orElse("").toLowerCase(Locale.ROOT);
@@ -190,13 +199,13 @@ public class ProductionInventoryPanel extends JPanel {
 
         activePredicate = p;
         tableModel.applyFilter(activePredicate);
-        updateStatus("Filtrirano: " + table.getRowCount() + " artikala");
+        updateStatus("Filtrirano: " + table.getRowCount());
     }
 
     private void reload() {
         try {
             tableModel.setData(inventoryService.fullView());
-            tableModel.applyFilter(activePredicate); // re-apply filter
+            tableModel.applyFilter(activePredicate);
             updateStatus("Učitano: " + table.getRowCount());
         } catch (SQLException ex) {
             showError("Greška kod čitanja: " + ex.getMessage(), ex);
@@ -240,54 +249,52 @@ public class ProductionInventoryPanel extends JPanel {
     }
 
     private ProductInventoryView getSelectedView() {
-        int viewRow = table.getSelectedRow();
-        if (viewRow < 0) {
-            showInfo("Ništa nije odabrano.");
+        int vr = table.getSelectedRow();
+        if (vr < 0) {
+            JOptionPane.showMessageDialog(this, "Ništa nije odabrano.");
             return null;
         }
-        int modelRow = table.convertRowIndexToModel(viewRow);
-        return tableModel.getAt(modelRow); // FIX: was getRow(...)
+        int mr = table.convertRowIndexToModel(vr);
+        return tableModel.getAt(mr);
     }
 
     private void adjustSelectedQuantity(double delta) {
-        ProductInventoryView piv = getSelectedView();
-        if (piv == null) return;
-        String code = piv.getProduct().getProductCode();
+        var v = getSelectedView();
+        if (v == null) return;
         try {
-            inventoryService.adjustQuantity(code, delta);
-            reloadSelecting(code);
-        } catch (Exception e) {
-            showError("Ne mogu prilagoditi količinu: " + e.getMessage(), e);
+            inventoryService.adjustQuantity(v.getProduct().getProductCode(), delta);
+            reloadSelecting(v.getProduct().getProductCode());
+        } catch (Exception ex) {
+            showError("Ne mogu prilagoditi: " + ex.getMessage(), ex);
         }
     }
 
     private void setSelectedQuantity() {
-        ProductInventoryView piv = getSelectedView();
-        if (piv == null) return;
-        String code = piv.getProduct().getProductCode();
-        String s = JOptionPane.showInputDialog(this,
-                "Nova količina za " + code,
-                piv.getInventory().getQuantity());
+        var v = getSelectedView();
+        if (v == null) return;
+        String code = v.getProduct().getProductCode();
+        String s = JOptionPane.showInputDialog(this, "Nova količina za " + code,
+                v.getInventory().getQuantity());
         if (s == null) return;
         try {
             double q = Double.parseDouble(s.replace(',', '.').trim());
             inventoryService.setQuantity(code, q);
             reloadSelecting(code);
         } catch (NumberFormatException ex) {
-            showInfo("Neispravan broj.");
+            JOptionPane.showMessageDialog(this, "Neispravan broj.");
         } catch (Exception ex) {
-            showError("Greška pri postavljanju: " + ex.getMessage(), ex);
+            showError("Greška: " + ex.getMessage(), ex);
         }
     }
 
-    private void reloadSelecting(String productCode) {
+    private void reloadSelecting(String code) {
         reload();
         for (int r = 0; r < table.getRowCount(); r++) {
-            int modelRow = table.convertRowIndexToModel(r);
-            ProductInventoryView piv = tableModel.getAt(modelRow);
-            if (piv != null && productCode.equals(piv.getProduct().getProductCode())) {
+            int mr = table.convertRowIndexToModel(r);
+            var piv = tableModel.getAt(mr);
+            if (piv != null && code.equals(piv.getProduct().getProductCode())) {
                 table.getSelectionModel().setSelectionInterval(r, r);
-                table.scrollRectToVisible(table.getCellRect(r, 0, true));
+                table.scrollRectToVisible(table.getCellRect(r,0,true));
                 break;
             }
         }
@@ -296,30 +303,62 @@ public class ProductionInventoryPanel extends JPanel {
     private void showTotalValue() {
         double total = 0.0;
         for (int r = 0; r < table.getRowCount(); r++) {
-            int modelRow = table.convertRowIndexToModel(r);
-            ProductInventoryView piv = tableModel.getAt(modelRow);
-            if (piv != null && piv.getTotalValue() != null) {
-                total += piv.getTotalValue();
-            }
+            int mr = table.convertRowIndexToModel(r);
+            var piv = tableModel.getAt(mr);
+            if (piv != null && piv.getTotalValue() != null) total += piv.getTotalValue();
         }
         JOptionPane.showMessageDialog(this,
-                "Ukupna vrijednost (filtrirano): " + nf.format(total),
-                "Total",
-                JOptionPane.INFORMATION_MESSAGE);
+                "Ukupna vrijednost (filtrirano): " + nf.format(total));
     }
 
-    private void updateStatus(String msg) {
-        lblStatus.setText(msg);
+    // NEW – turnover
+    private void showTurnoverForSelected() {
+        var v = getSelectedView();
+        if (v == null) return;
+        try {
+            var pm = procurementService.PeriodMonths.fromLabel((String) cmbPeriod.getSelectedItem());
+            var res = procurementService.computeTurnover(v.getProduct().getProductCode(), pm);
+            JOptionPane.showMessageDialog(this,
+                    "Prodano: " + res.salesQty + "\n" +
+                    "Prosj. zaliha (aproks.): " + res.avgQty + "\n" +
+                    "Obrtaj (" + pm.months + "M): " + res.turnover,
+                    "Obrtaj", JOptionPane.INFORMATION_MESSAGE);
+        } catch (Exception ex) {
+            showError("Greška obrtaj: " + ex.getMessage(), ex);
+        }
     }
+
+    // NEW – order suggestions
+    private void generateOrders() {
+        try {
+            var pm = procurementService.PeriodMonths.fromLabel((String) cmbPeriod.getSelectedItem());
+            var list = procurementService.suggestOrders(pm, 30, 0.2); // coverage 30 dana, safety 20%
+            if (list.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "Nema prijedloga.");
+                return;
+            }
+            new OrderSuggestionsDialog(SwingUtilities.getWindowAncestor(this), list).setVisible(true);
+        } catch (Exception ex) {
+            showError("Greška narudžbe: " + ex.getMessage(), ex);
+        }
+    }
+
+    // NEW – assign dialog
+    private void openAssignDialog() {
+        var v = getSelectedView();
+        if (v == null) return;
+        new ProductSupplierAssignDialog(
+                SwingUtilities.getWindowAncestor(this),
+                cp,
+                v.getProduct().getProductCode()
+        ).setVisible(true);
+    }
+
+    private void updateStatus(String m) { lblStatus.setText(m); }
 
     private void showError(String msg, Exception ex) {
         ex.printStackTrace();
         JOptionPane.showMessageDialog(this, msg, "Greška", JOptionPane.ERROR_MESSAGE);
         updateStatus("Greška: " + msg);
-    }
-
-    private void showInfo(String msg) {
-        JOptionPane.showMessageDialog(this, msg, "Info", JOptionPane.INFORMATION_MESSAGE);
-        updateStatus(msg);
     }
 }
