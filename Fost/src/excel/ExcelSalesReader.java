@@ -1,319 +1,372 @@
 package excel;
 
+import model.SalesRecord;
 import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.ss.util.CellRangeAddress;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.apache.poi.ss.usermodel.DateUtil;
 
-import java.io.InputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.math.BigDecimal;
-import java.text.Normalizer;
-import java.time.LocalDate;
-import java.time.ZoneId;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Reader za Excel izvještaj s kolonama:
+ * Datum | Tip dok. | Br. dok. | Komitent / opis | Šifra | Naziv robe / opis | Količina |
+ * Nabavna vrijednost | Bruto vrijednost | Iznos rabata | Rabat % | Neto vrijednost |
+ * Marža | % Marže na NC | % Marže od VPC | PDV | Ukupna vrijednost
+ *
+ * Funkcionalnosti:
+ *  - Mapiranje po headeru (case-insensitive, uklanja dijakritike/spaces).
+ *  - "Carry forward" zadnji datum / tip dok. / broj dok. (često se ispuštaju u izvještaju).
+ *  - Parsiranje hrvatskih decimala ("," -> ".").
+ *  - Automatsko punjenje SalesRecord polja prisutnih u bazi:
+ *      product_code, date, quantity, doc_type, doc_no,
+ *      net_amount, gross_amount, vat_amount, discount_amount,
+ *      customer_code, cogs_amount
+ *  - COGS = “Nabavna vrijednost” (ukupna) – ako želiš drugačije, promijeni u kodu.
+ *  - Debug ispis (enableDebug).
+ */
 public class ExcelSalesReader {
 
-    public static class RawRow {
-        public LocalDate date;
-        public String docType;
-        public String docNo;
-        public String productCode; // Šifra
-        public String productName; // Naziv robe / opis
-        public double quantity;
-        public BigDecimal netAmount;
-        public BigDecimal grossAmount;
-        public BigDecimal vatAmount;
-        public BigDecimal discountAmount;
-    }
+    /* Konfiguracija */
+    private boolean hasHeader = true;
+    private boolean debug = false;
+    private int debugRows = 10;
+    private boolean strictDate = false;
 
-    private static final String H_DATE = "datum";
-    private static final String H_DOC_TYPE = "tip dok";
-    private static final String H_DOC_NO = "br. dok";
-    private static final String H_CODE = "šifra";
-    private static final String H_NAME = "naziv robe";
-    private static final String H_QTY = "količina";
-    private static final String H_NET = "neto vrijednost";
-    private static final String H_GROSS = "bruto vrijednost";
-    private static final String H_PDV = "pdv";
-    private static final String H_DISCOUNT = "iznos rabata";
+    /* Carry-forward vrijednosti */
+    private LocalDate lastDate = null;
+    private String lastDocType = "";
+    private String lastDocNo = "";
 
-    // Regex za datume u tekstu, tolerira razmake i točku na kraju: dd[./-]MM[./-]yyyy (s opcionalnom točkom)
-    private static final Pattern DATE_RX = Pattern.compile(
-            "\\b(\\d{1,2})\\s*[./-]\\s*(\\d{1,2})\\s*[./-]\\s*(\\d{2,4})\\.?\\b"
+    /* Date patterni */
+    private final List<DateTimeFormatter> dateFormats = new ArrayList<>(List.of(
+            DateTimeFormatter.ofPattern("d.M.yyyy"),
+            DateTimeFormatter.ofPattern("dd.MM.yyyy"),
+            DateTimeFormatter.ofPattern("d.M.yyyy HH:mm"),
+            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"),
+            DateTimeFormatter.ofPattern("d.M.yyyy HH:mm:ss"),
+            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"),
+            DateTimeFormatter.ofPattern("yyyy-MM-dd")
+    ));
+
+    /* Normalizirani nazivi headera -> ključ */
+    private static final Map<String, String> HEADER_CANON = Map.ofEntries(
+            entry("datum", "DATE"),
+            entry("tipdok.", "DOC_TYPE"),
+            entry("tipdok", "DOC_TYPE"),
+            entry("br.dok.", "DOC_NO"),
+            entry("br.dok", "DOC_NO"),
+            entry("komitent/opis", "CUSTOMER"),
+            entry("komitentopis", "CUSTOMER"),
+            entry("komitent", "CUSTOMER"),
+            entry("šifra", "CODE"),
+            entry("sifra", "CODE"),
+            entry("nazivrobe/opis", "DESC"),
+            entry("nazivrobe", "DESC"),
+            entry("nazivrobeopis", "DESC"),
+            entry("naziv", "DESC"),
+            entry("količina", "QTY"),
+            entry("kolicina", "QTY"),
+            entry("nabavnavrijednost", "COST_VALUE"),
+            entry("brutovrijednost", "GROSS_VALUE"),
+            entry("iznosrabata", "DISCOUNT_VALUE"),
+            entry("rabat%", "DISCOUNT_PCT"),
+            entry("rabat", "DISCOUNT_PCT"), // fallback
+            entry("netovrijednost", "NET_VALUE"),
+            entry("marža", "MARGIN"),
+            entry("marza", "MARGIN"),
+            entry("%maržena nc", "MARGIN_PCT_NC"),
+            entry("%maržena", "MARGIN_PCT_NC"),
+            entry("%marzena", "MARGIN_PCT_NC"),
+            entry("%maržeod vpc", "MARGIN_PCT_VPC"),
+            entry("%marzeod vpc", "MARGIN_PCT_VPC"),
+            entry("pdv", "VAT"),
+            entry("ukupnavrijednost", "TOTAL_VALUE")
     );
 
-    public List<RawRow> read(InputStream in) throws Exception {
-        try (Workbook wb = new XSSFWorkbook(in)) {
+    private static Map.Entry<String,String> entry(String a, String b) {
+        return Map.entry(a, b);
+    }
+
+    /* Fluent konfiguracija */
+    public ExcelSalesReader withHeader(boolean header) {
+        this.hasHeader = header; return this;
+    }
+    public ExcelSalesReader enableDebug(boolean dbg) {
+        this.debug = dbg; return this;
+    }
+    public ExcelSalesReader debugRows(int rows) {
+        this.debugRows = rows; return this;
+    }
+    public ExcelSalesReader withStrictDate(boolean strict) {
+        this.strictDate = strict; return this;
+    }
+    public ExcelSalesReader addDatePattern(String pattern) {
+        dateFormats.add(DateTimeFormatter.ofPattern(pattern));
+        return this;
+    }
+
+    /* Glavna metoda */
+    public List<SalesRecord> parse(File file, LocalDate fallbackDate) throws Exception {
+        if (!file.exists()) throw new IllegalArgumentException("Excel ne postoji: " + file.getAbsolutePath());
+        List<SalesRecord> out = new ArrayList<>();
+
+        try (FileInputStream fis = new FileInputStream(file);
+             Workbook wb = WorkbookFactory.create(fis)) {
+
             Sheet sheet = wb.getSheetAt(0);
-
-            int headerRowIdx = detectHeaderRow(sheet);
-            if (headerRowIdx < 0) {
-                throw new IllegalArgumentException("Header nije pronađen u prvih 50 redova.");
-            }
-            Row header = sheet.getRow(headerRowIdx);
-            Map<String, Integer> idx = mapHeader(header);
-
-            if (!idx.containsKey(H_DATE) || !idx.containsKey(H_CODE) || !idx.containsKey(H_QTY)) {
-                StringBuilder sb = new StringBuilder("Header mora sadržavati barem: Datum, Šifra, Količina. Nađeno: ");
-                List<String> found = new ArrayList<>();
-                idx.forEach((k, v) -> found.add(k + "->" + v));
-                sb.append(String.join(", ", found));
-                throw new IllegalArgumentException(sb.toString());
+            if (sheet == null) {
+                if (debug) System.out.println("SalesReader: sheet=null");
+                return out;
             }
 
-            int dateCol = idx.get(H_DATE);
+            int lastRow = sheet.getLastRowNum();
+            if (debug) System.out.println("SalesReader: lastRowIndex=" + lastRow);
 
-            List<RawRow> rows = new ArrayList<>();
-            LocalDate lastDateSeen = null;
-            Deque<RawRow> pendingBeforeFirstDate = new ArrayDeque<>();
+            // Mapiranje headera
+            Map<String, Integer> colMap = new HashMap<>();
+            int startRow = 0;
+            if (hasHeader) {
+                Row header = sheet.getRow(0);
+                if (header == null) return out;
+                for (int c = 0; c < header.getLastCellNum(); c++) {
+                    Cell cell = header.getCell(c, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
+                    if (cell == null) continue;
+                    String raw = getCellString(cell);
+                    if (raw == null) continue;
+                    String norm = normalize(raw);
+                    String canon = HEADER_CANON.get(norm);
+                    if (canon != null) {
+                        colMap.put(canon, c);
+                        if (debug) System.out.println("Header map: '" + raw + "' -> " + canon + " (col " + c + ")");
+                    }
+                }
+                startRow = 1;
+            }
 
-            for (int r = headerRowIdx + 1; r <= sheet.getLastRowNum(); r++) {
+            DataFormatter formatter = new DataFormatter(Locale.getDefault());
+
+            for (int r = startRow; r <= lastRow; r++) {
                 Row row = sheet.getRow(r);
                 if (row == null) continue;
-                if (isRowEmpty(row)) continue;
 
-                LocalDate thisDate = readLocalDateSmart(sheet, row, dateCol);
-                RawRow rr = new RawRow();
-                rr.date = thisDate; // zasad stvarni datum iz reda (može biti null)
-                rr.docType = readString(row, idx.get(H_DOC_TYPE));
-                rr.docNo = readString(row, idx.get(H_DOC_NO));
-                rr.productCode = readString(row, idx.get(H_CODE));
-                rr.productName = readString(row, idx.get(H_NAME));
-                rr.quantity = readDouble(row, idx.get(H_QTY));
-                rr.netAmount = readDecimal(row, idx.get(H_NET));
-                rr.grossAmount = readDecimal(row, idx.get(H_GROSS));
-                rr.vatAmount = readDecimal(row, idx.get(H_PDV));
-                rr.discountAmount = readDecimal(row, idx.get(H_DISCOUNT));
-
-                if (thisDate != null) {
-                    // Ako je prvi put viđen datum – back-fill svim pending redovima iznad
-                    if (lastDateSeen == null) {
-                        while (!pendingBeforeFirstDate.isEmpty()) {
-                            RawRow prev = pendingBeforeFirstDate.pollFirst();
-                            prev.date = thisDate;
-                            rows.add(prev);
-                        }
-                    }
-                    lastDateSeen = thisDate;
-                    rows.add(rr);
-                } else {
-                    if (lastDateSeen != null) {
-                        rr.date = lastDateSeen; // forward-fill
-                        rows.add(rr);
+                // DATUM
+                LocalDate date = readDate(row, colMap.get("DATE"), formatter, fallbackDate);
+                if (date == null) {
+                    if (strictDate) {
+                        if (debug) System.out.println("SKIP r=" + r + " (nema valjanog datuma, strict)");
+                        continue;
                     } else {
-                        // Još nismo vidjeli nijedan datum – spremi za back-fill kad naiđemo na prvi
-                        pendingBeforeFirstDate.addLast(rr);
+                        date = (fallbackDate != null) ? fallbackDate : LocalDate.now();
                     }
+                } else {
+                    lastDate = date;
+                }
+                if (date == null) date = lastDate; // carry
+                if (date == null) {
+                    if (debug) System.out.println("SKIP r=" + r + " (date i nakon carry = null)");
+                    continue;
+                }
+
+                // DOC TYPE
+                String docType = readString(row, colMap.get("DOC_TYPE"), formatter);
+                if (docType != null && !docType.isBlank()) lastDocType = docType;
+                docType = (docType == null || docType.isBlank()) ? lastDocType : docType;
+
+                // DOC NO
+                String docNo = readString(row, colMap.get("DOC_NO"), formatter);
+                if (docNo != null && !docNo.isBlank()) lastDocNo = docNo;
+                docNo = (docNo == null || docNo.isBlank()) ? lastDocNo : docNo;
+
+                // CUSTOMER
+                String customer = readString(row, colMap.get("CUSTOMER"), formatter);
+
+                // PRODUCT CODE (obvezno)
+                String productCode = readString(row, colMap.get("CODE"), formatter);
+                if (productCode == null || productCode.isBlank()) {
+                    if (debug) System.out.println("SKIP r=" + r + " (nema Šifra)");
+                    continue;
+                }
+                productCode = productCode.trim();
+                // Često se dogodi da “Šifra” izgleda “: 32050035” u nekom scenariju
+                if (productCode.startsWith(":")) productCode = productCode.substring(1).trim();
+
+                // QUANTITY
+                Double qty = readNumber(row, colMap.get("QTY"), formatter);
+                if (qty == null || Math.abs(qty) < 1e-12) {
+                    if (debug) System.out.println("SKIP r=" + r + " (qty null/0)");
+                    continue;
+                }
+
+                // COST (nabavna vrijednost) – uzet ćemo kao cogs_amount (ukupno)
+                Double costValue = readNumber(row, colMap.get("COST_VALUE"), formatter);
+
+                // GROSS
+                Double grossValue = readNumber(row, colMap.get("GROSS_VALUE"), formatter);
+
+                // DISCOUNT VAL
+                Double discountVal = readNumber(row, colMap.get("DISCOUNT_VALUE"), formatter);
+
+                // NET
+                Double netValue = readNumber(row, colMap.get("NET_VALUE"), formatter);
+
+                // VAT
+                Double vatValue = readNumber(row, colMap.get("VAT"), formatter);
+
+                // Sastavi SalesRecord
+                SalesRecord rec = new SalesRecord();
+                rec.setProductCode(productCode);
+                rec.setDate(date);
+                rec.setQuantity(qty);
+
+                // Doc meta
+                rec.setDocType(docType == null ? "" : docType);
+                rec.setDocNo(docNo == null ? "" : docNo);
+
+                if (customer != null && !customer.isBlank()) {
+                    // customer_code – ako želiš skratiti, može regex; ostavljam raw
+                    rec.setCustomerCode(customer.trim());
+                }
+
+                if (netValue != null)    rec.setNetAmount(BigDecimal.valueOf(netValue));
+                if (grossValue != null)  rec.setGrossAmount(BigDecimal.valueOf(grossValue));
+                if (vatValue != null)    rec.setVatAmount(BigDecimal.valueOf(vatValue));
+                if (discountVal != null) rec.setDiscountAmount(BigDecimal.valueOf(discountVal));
+                if (costValue != null)   rec.setCogsAmount(costValue); // total cost
+
+                out.add(rec);
+
+                if (debug && out.size() <= debugRows) {
+                    System.out.println("READ r=" + r +
+                            " code=" + productCode +
+                            " qty=" + qty +
+                            " net=" + netValue +
+                            " cost=" + costValue +
+                            " gross=" + grossValue +
+                            " date=" + date +
+                            " doc=" + docType + "/" + docNo);
                 }
             }
-
-            // Ako nismo našli nijedan datum u cijeloj radnoj tablici, zadrži te retke bez datuma; caller će prijaviti
-            rows.addAll(pendingBeforeFirstDate);
-            return rows;
         }
+
+        if (debug) System.out.println("Parsed sales rows: " + out.size());
+        return out;
     }
 
-    private int detectHeaderRow(Sheet sheet) {
-        int last = Math.min(sheet.getLastRowNum(), 50);
-        for (int r = 0; r <= last; r++) {
-            Row row = sheet.getRow(r);
-            if (row == null) continue;
-            Map<String, Integer> idx = mapHeader(row);
-            if (idx.containsKey(H_DATE) && idx.containsKey(H_CODE) && idx.containsKey(H_QTY)) {
-                return r;
-            }
+    /* ----------------- Helpers ----------------- */
+
+    private LocalDate readDate(Row row, Integer colIdx, DataFormatter fmt, LocalDate fallback) {
+        Cell cell = (colIdx == null) ? null : row.getCell(colIdx, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
+        if (cell == null) {
+            // carry-forward
+            if (lastDate != null) return lastDate;
+            return strictDate ? null : (fallback != null ? fallback : LocalDate.now());
         }
-        return -1;
-    }
-
-    private Map<String, Integer> mapHeader(Row header) {
-        Map<String, Integer> map = new HashMap<>();
-        for (Cell c : header) {
-            String raw = getString(c);
-            if (raw == null) continue;
-            String k = normalizeHeader(raw);
-
-            if (containsAny(k, "datum", "date", "dat")) { map.putIfAbsent(H_DATE, c.getColumnIndex()); continue; }
-            if (containsAll(k, "tip", "dok")) { map.putIfAbsent(H_DOC_TYPE, c.getColumnIndex()); continue; }
-            if (containsAll(k, "dok") && containsAny(k, "br", "broj")) { map.putIfAbsent(H_DOC_NO, c.getColumnIndex()); continue; }
-            if (containsAny(k, "šifra", "sifra", "sifraartikla", "šifraartikla", "sifrarobe", "šifrarobe", "code")) { map.putIfAbsent(H_CODE, c.getColumnIndex()); continue; }
-            if (containsAny(k, "naziv") || containsAny(k, "opis")) { map.putIfAbsent(H_NAME, c.getColumnIndex()); continue; }
-            if (containsAny(k, "količina", "kolicina", "qty", "quantity") || k.startsWith("kol")) { map.putIfAbsent(H_QTY, c.getColumnIndex()); continue; }
-            if (containsAll(k, "neto", "vrijed")) { map.putIfAbsent(H_NET, c.getColumnIndex()); continue; }
-            if (containsAll(k, "bruto", "vrijed")) { map.putIfAbsent(H_GROSS, c.getColumnIndex()); continue; }
-            if (k.equals("pdv")) { map.putIfAbsent(H_PDV, c.getColumnIndex()); continue; }
-            if (containsAll(k, "iznos", "rabat")) { map.putIfAbsent(H_DISCOUNT, c.getColumnIndex()); }
-        }
-        return map;
-    }
-
-    private String normalizeHeader(String s) {
-        if (s == null) return null;
-        String t = s.replace('\u00A0', ' ') // NBSP -> space
-                    .replace('\u2007', ' ')
-                    .replace('\u202F', ' ')
-                    .trim()
-                    .toLowerCase(Locale.ROOT);
-        t = Normalizer.normalize(t, Normalizer.Form.NFD).replaceAll("\\p{M}+", "");
-        t = t.replaceAll("[\\p{Punct}]+", " ");
-        t = t.replaceAll("\\s+", " ").trim();
-        return t;
-    }
-
-    private boolean containsAny(String hay, String... needles) {
-        for (String n : needles) if (hay.contains(n)) return true;
-        return false;
-    }
-
-    private boolean containsAll(String hay, String... needles) {
-        for (String n : needles) if (!hay.contains(n)) return false;
-        return true;
-    }
-
-    private boolean isRowEmpty(Row row) {
-        for (Cell c : row) {
-            if (c == null) continue;
-            if (c.getCellType() == CellType.BLANK) continue;
-            String s = getString(c);
-            if (s != null && !s.isBlank()) return false;
-            if (c.getCellType() == CellType.NUMERIC && !DateUtil.isCellDateFormatted(c) && c.getNumericCellValue() != 0.0) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private String getString(Cell c) {
-        if (c == null) return null;
-        return switch (c.getCellType()) {
-            case STRING -> c.getStringCellValue().trim();
-            case NUMERIC -> DateUtil.isCellDateFormatted(c) ? null : numericToString(c.getNumericCellValue());
-            case FORMULA -> {
-                try {
-                    FormulaEvaluator evaluator = c.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
-                    CellValue cv = evaluator.evaluate(c);
-                    yield switch (cv.getCellType()) {
-                        case STRING -> cv.getStringValue().trim();
-                        case NUMERIC -> DateUtil.isCellDateFormatted(c) ? null : numericToString(cv.getNumberValue());
-                        default -> null;
-                    };
-                } catch (Exception e) { yield null; }
-            }
-            default -> null;
-        };
-    }
-
-    private String numericToString(double v) {
-        if (Math.floor(v) == v) return String.valueOf((long) v);
-        return String.valueOf(v);
-    }
-
-    private LocalDate readLocalDateSmart(Sheet sheet, Row row, int col) {
-        Cell c = row.getCell(col);
-        if (c == null || isBlank(c)) {
-            Cell topLeft = getMergedRegionTopLeft(sheet, row.getRowNum(), col);
-            if (topLeft != null) c = topLeft;
-        }
-        return parseDateCell(c);
-    }
-
-    private boolean isBlank(Cell c) {
-        if (c == null) return true;
-        if (c.getCellType() == CellType.BLANK) return true;
-        if (c.getCellType() == CellType.STRING) return c.getStringCellValue() == null || c.getStringCellValue().trim().isEmpty();
-        return false;
-    }
-
-    private LocalDate parseDateCell(Cell c) {
-        if (c == null) return null;
-
         try {
-            // 1) Ako je Excel numeric i validan datum, uzmi ga (čak i bez date formata)
-            if (c.getCellType() == CellType.NUMERIC) {
-                double num = c.getNumericCellValue();
-                if (DateUtil.isCellDateFormatted(c) || DateUtil.isValidExcelDate(num)) {
-                    return DateUtil.getJavaDate(num).toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
-                }
-            }
+            CellType ct = cell.getCellType();
+            if (ct == CellType.FORMULA) ct = cell.getCachedFormulaResultType();
 
-            // 2) Ako je formula – evaluiraj pa ponovi logiku
-            if (c.getCellType() == CellType.FORMULA) {
-                FormulaEvaluator evaluator = c.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
-                CellValue cv = evaluator.evaluate(c);
-                if (cv != null) {
-                    if (cv.getCellType() == CellType.NUMERIC) {
-                        double num = cv.getNumberValue();
-                        if (DateUtil.isValidExcelDate(num)) {
-                            return DateUtil.getJavaDate(num).toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
-                        }
-                    } else if (cv.getCellType() == CellType.STRING) {
-                        LocalDate parsed = parseDateText(cv.getStringValue());
-                        if (parsed != null) return parsed;
+            if (ct == CellType.NUMERIC) {
+                if (DateUtil.isCellDateFormatted(cell)) {
+                    Date d = cell.getDateCellValue();
+                    return toLocalDate(d);
+                } else {
+                    double v = cell.getNumericCellValue();
+                    if (v > 20000 && v < 90000) {
+                        Date d = DateUtil.getJavaDate(v);
+                        return toLocalDate(d);
                     }
+                    String asText = fmt.formatCellValue(cell);
+                    return parseDateString(asText, fallback);
                 }
+            } else if (ct == CellType.STRING) {
+                String s = fmt.formatCellValue(cell);
+                return parseDateString(s, fallback);
             }
-
-            // 3) Tekstualni datum
-            if (c.getCellType() == CellType.STRING) {
-                String s = c.getStringCellValue();
-                LocalDate parsed = parseDateText(s);
-                if (parsed != null) return parsed;
-            }
-        } catch (Exception ignored) {}
-
-        return null;
-    }
-
-    private LocalDate parseDateText(String s) {
-        if (s == null) return null;
-        String t = s.replace('\u00A0', ' ')
-                    .replace('\u2007', ' ')
-                    .replace('\u202F', ' ')
-                    .trim();
-        Matcher m = DATE_RX.matcher(t);
-        if (m.find()) {
-            int d = Integer.parseInt(m.group(1));
-            int M = Integer.parseInt(m.group(2));
-            int y = Integer.parseInt(m.group(3));
-            if (y < 100) y += 2000;
-            try { return LocalDate.of(y, M, d); } catch (Exception ignored) {}
+            return strictDate ? null : (fallback != null ? fallback : LocalDate.now());
+        } catch (Exception e) {
+            return strictDate ? null : (fallback != null ? fallback : LocalDate.now());
         }
-        return null;
     }
 
-    private Cell getMergedRegionTopLeft(Sheet sheet, int row, int col) {
-        int count = sheet.getNumMergedRegions();
-        for (int i = 0; i < count; i++) {
-            CellRangeAddress r = sheet.getMergedRegion(i);
-            if (r.isInRange(row, col)) {
-                Row topRow = sheet.getRow(r.getFirstRow());
-                if (topRow == null) return null;
-                return topRow.getCell(r.getFirstColumn());
+    private LocalDate parseDateString(String txt, LocalDate fallback) {
+        if (txt == null) return strictDate ? null : (fallback != null ? fallback : LocalDate.now());
+        txt = txt.trim();
+        if (txt.isEmpty()) return strictDate ? null : (fallback != null ? fallback : LocalDate.now());
+        txt = txt.replace('\u00A0', ' '); // NBSP
+
+        for (DateTimeFormatter f : dateFormats) {
+            try { return LocalDate.parse(txt, f); } catch (Exception ignored) {}
+        }
+        // pokušaj izvući samo datum dio
+        int space = txt.indexOf(' ');
+        if (space > 0) {
+            String only = txt.substring(0, space);
+            for (DateTimeFormatter f : dateFormats) {
+                try { return LocalDate.parse(only, f); } catch (Exception ignored) {}
             }
         }
-        return null;
+        return strictDate ? null : (fallback != null ? fallback : LocalDate.now());
     }
 
-    private String readString(Row row, Integer col) {
-        if (col == null) return null;
-        return getString(row.getCell(col));
+    private LocalDate toLocalDate(Date d) {
+        if (d == null) return null;
+        return Instant.ofEpochMilli(d.getTime())
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate();
     }
 
-    private double readDouble(Row row, Integer col) {
-        if (col == null) return 0.0;
-        Cell c = row.getCell(col);
-        if (c == null) return 0.0;
-        if (c.getCellType() == CellType.NUMERIC) return c.getNumericCellValue();
-        String s = getString(c);
-        if (s == null || s.isBlank()) return 0.0;
-        s = s.replace(".", "").replace(",", ".");
-        try { return Double.parseDouble(s); } catch (Exception e) { return 0.0; }
+    private String readString(Row row, Integer colIdx, DataFormatter fmt) {
+        if (colIdx == null) return null;
+        Cell c = row.getCell(colIdx, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
+        if (c == null) return null;
+        String v = fmt.formatCellValue(c);
+        return (v == null || v.trim().isEmpty()) ? null : v.trim();
     }
 
-    private java.math.BigDecimal readDecimal(Row row, Integer col) {
-        double d = readDouble(row, col);
-        return d == 0.0 ? null : java.math.BigDecimal.valueOf(d);
+    private Double readNumber(Row row, Integer colIdx, DataFormatter fmt) {
+        if (colIdx == null) return null;
+        Cell c = row.getCell(colIdx, Row.MissingCellPolicy.RETURN_BLANK_AS_NULL);
+        if (c == null) return null;
+        try {
+            CellType ct = c.getCellType();
+            if (ct == CellType.FORMULA) ct = c.getCachedFormulaResultType();
+            if (ct == CellType.NUMERIC) return c.getNumericCellValue();
+            String s = fmt.formatCellValue(c);
+            if (s == null) return null;
+            s = s.trim().replace('.', '#'); // ako ima tisućice s točkama -> privremeno
+            s = s.replace(',', '.');
+            s = s.replace("#", ""); // makni tisućice
+            if (s.isEmpty()) return null;
+            if (s.matches("[-+]?[0-9]*\\.?[0-9]+")) return Double.parseDouble(s);
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String getCellString(Cell cell) {
+        if (cell == null) return null;
+        try {
+            cell.setCellType(CellType.STRING);
+            return cell.getStringCellValue().trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String normalize(String s) {
+        if (s == null) return "";
+        String lower = s.toLowerCase(Locale.ROOT).trim();
+        // ukloni dijakritiku
+        lower = java.text.Normalizer.normalize(lower, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "");
+        // ukloni višak razmaka i točke/spojeve
+        lower = lower.replaceAll("\\s+", "");
+        return lower;
     }
 }

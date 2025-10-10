@@ -115,13 +115,14 @@ public class ProductSupplierAssignDialog extends JDialog {
 
     private void addSupplierRelation() {
         try {
-            // popup s listom svih dobavljača
             List<Supplier> all = supplierDao.findAll();
             if (all.isEmpty()) {
-                JOptionPane.showMessageDialog(this, "Nema dobavljača – dodaj u 'Dobavljači' dijalogu.");
+                JOptionPane.showMessageDialog(this, "Nema dobavljača – dodaj u 'Dobavljači'.");
                 return;
             }
-            String[] codes = all.stream().map(Supplier::getSupplierCode).toArray(String[]::new);
+            String[] codes = all.stream()
+                    .map(this::codeOf) // tolerantno
+                    .toArray(String[]::new);
             String sel = (String) JOptionPane.showInputDialog(this,
                     "Odaberi dobavljača:",
                     "Dodaj vezu",
@@ -130,13 +131,25 @@ public class ProductSupplierAssignDialog extends JDialog {
                     codes,
                     codes[0]);
             if (sel == null) return;
-            // default vrijednosti
             ProductSupplier ps = new ProductSupplier(productCode, sel, false, null, null, null);
             psDao.upsert(ps);
             reloadList();
             lstSuppliers.setSelectedIndex(listModel.size() - 1);
         } catch (Exception ex) {
             showError(ex);
+        }
+    }
+
+    private String codeOf(Supplier s) {
+        try {
+            return s.getSupplierCode();
+        } catch (NoSuchMethodError | Exception ignored) {
+            // fallback ako imaš getCode()
+            try {
+                return (String) s.getClass().getMethod("getCode").invoke(s);
+            } catch (Exception e) {
+                return "??";
+            }
         }
     }
 

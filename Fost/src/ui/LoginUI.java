@@ -134,14 +134,21 @@ public class LoginUI extends JFrame {
         // --- NOVI GUMB: "Inventory" (otvara ProductionInventoryPanel) ---
         gbc.gridy++;
         JButton btnInventory = new JButton("Inventory");
-        btnInventory.addActionListener(ev -> openInventoryWindow());
+        btnInventory.addActionListener(ev -> {
+			try {
+				openInventoryWindow();
+			} catch (Exception e1) {
+				// TODO Auto-generated catch block
+				e1.printStackTrace();
+			}
+		});
         backgroundPanel.add(btnInventory, gbc);
 
         getRootPane().setDefaultButton(btnLogin);
         setVisible(true);
     }
 
-    private void openInventoryWindow() {
+    private void openInventoryWindow() throws Exception {
         JFrame f = new JFrame("Production Inventory");
         f.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         f.setContentPane(new ProductionInventoryPanel(DB_URL));

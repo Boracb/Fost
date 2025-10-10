@@ -10,17 +10,15 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * SQLite implementation of SalesDao.
- * Handles automatic (idempotent) schema evolution.
+ * SQLite implementacija SalesDao.
  */
 public class SalesDaoImpl implements SalesDao {
 
-    private static final String TABLE_NAME = "sales";
+    private static final String TABLE = "sales";
     private static volatile boolean schemaEnsured = false;
 
     private final ConnectionProvider cp;
 
-    // ---- SQL CONSTANTS ----
     private static final String CREATE_TABLE_SQL = """
         CREATE TABLE IF NOT EXISTS sales (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,20 +29,22 @@ public class SalesDaoImpl implements SalesDao {
           doc_no         TEXT NOT NULL DEFAULT '',
           net_amount     REAL,
           gross_amount   REAL,
-          vat_amount     REAL,
+          vat_amount      REAL,
           discount_amount REAL,
-          customer_code  TEXT,
-          cogs_amount    REAL,
+          customer_code   TEXT,
+          cogs_amount     REAL,
           UNIQUE(product_code, date, doc_type, doc_no)
         )
         """;
 
-    private static final String IDX_PRODUCT_DATE = """
-        CREATE INDEX IF NOT EXISTS idx_sales_product_date ON sales(product_code, date)
+    private static final String SUM_QTY_RANGE_SQL = """
+        SELECT COALESCE(SUM(quantity),0) FROM sales
+        WHERE product_code=? AND date BETWEEN ? AND ?
         """;
 
-    private static final String IDX_CUSTOMER = """
-        CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_code)
+    private static final String SUM_COGS_RANGE_SQL = """
+        SELECT COALESCE(SUM(cogs_amount),0) FROM sales
+        WHERE product_code=? AND date BETWEEN ? AND ?
         """;
 
     private static final String UPSERT_SQL = """
@@ -62,47 +62,32 @@ public class SalesDaoImpl implements SalesDao {
             cogs_amount     = excluded.cogs_amount
         """;
 
-    private static final String SUM_QTY_RANGE_SQL = """
-        SELECT COALESCE(SUM(quantity),0) FROM sales
-        WHERE product_code = ? AND date BETWEEN ? AND ?
-        """;
-
-    private static final String SUM_COGS_RANGE_SQL = """
-        SELECT COALESCE(SUM(cogs_amount),0) FROM sales
-        WHERE product_code = ? AND date BETWEEN ? AND ?
-        """;
-
     public SalesDaoImpl(ConnectionProvider cp) {
         this.cp = cp;
         ensureSchema();
     }
 
-    /**
-     * Ensures the schema exists and performs additive (idempotent) migrations.
-     * Uses a static guard so we only do this once per JVM lifecycle.
-     */
     private void ensureSchema() {
-        if (schemaEnsured) {
-            return;
-        }
+        if (schemaEnsured) return;
         synchronized (SalesDaoImpl.class) {
             if (schemaEnsured) return;
             try (Connection c = cp.get(); Statement st = c.createStatement()) {
                 st.executeUpdate(CREATE_TABLE_SQL);
-                st.executeUpdate(IDX_PRODUCT_DATE);
-                st.executeUpdate(IDX_CUSTOMER);
-
-                // Idempotent column additions (for older deployments)
-                Set<String> cols = getColumns(c, TABLE_NAME);
+                Set<String> cols = getColumns(c, TABLE);
                 if (!cols.contains("customer_code")) {
-                    st.executeUpdate("ALTER TABLE " + TABLE_NAME + " ADD COLUMN customer_code TEXT");
+                    st.executeUpdate("ALTER TABLE " + TABLE + " ADD COLUMN customer_code TEXT");
                 }
                 if (!cols.contains("cogs_amount")) {
-                    st.executeUpdate("ALTER TABLE " + TABLE_NAME + " ADD COLUMN cogs_amount REAL");
+                    st.executeUpdate("ALTER TABLE " + TABLE + " ADD COLUMN cogs_amount REAL");
+                }
+                if (columnExists(c, TABLE, "product_code") && columnExists(c, TABLE, "date")) {
+                    st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sales_product_date ON sales(product_code, date)");
+                }
+                if (columnExists(c, TABLE, "customer_code")) {
+                    st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_code)");
                 }
                 schemaEnsured = true;
             } catch (SQLException e) {
-                // You may want to route through a logger
                 throw new RuntimeException("Failed ensuring sales schema", e);
             }
         }
@@ -110,14 +95,20 @@ public class SalesDaoImpl implements SalesDao {
 
     private Set<String> getColumns(Connection c, String table) throws SQLException {
         Set<String> s = new HashSet<>();
-        // Using PRAGMA table_info; we cannot parameterize identifiers—so ensure table is trusted constant.
         try (Statement st = c.createStatement();
              ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
-            while (rs.next()) {
-                s.add(rs.getString("name"));
-            }
+            while (rs.next()) s.add(rs.getString("name").toLowerCase());
         }
         return s;
+    }
+
+    private boolean columnExists(Connection c, String table, String column) throws SQLException {
+        String lc = column.toLowerCase();
+        try (Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (rs.next()) if (lc.equals(rs.getString("name").toLowerCase())) return true;
+        }
+        return false;
     }
 
     @Override
@@ -155,14 +146,11 @@ public class SalesDaoImpl implements SalesDao {
         }
     }
 
-    /**
-     * Optional performance helper: batch upserts inside a single transaction.
-     */
     public void batchUpsert(List<SalesRecord> records) throws Exception {
         if (records == null || records.isEmpty()) return;
         try (Connection c = cp.get();
              PreparedStatement ps = c.prepareStatement(UPSERT_SQL)) {
-            boolean oldAuto = c.getAutoCommit();
+            boolean auto = c.getAutoCommit();
             c.setAutoCommit(false);
             try {
                 for (SalesRecord r : records) {
@@ -175,7 +163,7 @@ public class SalesDaoImpl implements SalesDao {
                 c.rollback();
                 throw ex;
             } finally {
-                c.setAutoCommit(oldAuto);
+                c.setAutoCommit(auto);
             }
         }
     }
@@ -187,32 +175,23 @@ public class SalesDaoImpl implements SalesDao {
         ps.setString(4, rec.getDocType() == null ? "" : rec.getDocType());
         ps.setString(5, rec.getDocNo() == null ? "" : rec.getDocNo());
 
-        // Monetary fields - prefer BigDecimal for precision
         setNullableBigDecimal(ps, 6, rec.getNetAmount());
         setNullableBigDecimal(ps, 7, rec.getGrossAmount());
         setNullableBigDecimal(ps, 8, rec.getVatAmount());
         setNullableBigDecimal(ps, 9, rec.getDiscountAmount());
 
-        if (rec.getCustomerCode() == null) {
-            ps.setNull(10, Types.VARCHAR);
-        } else {
-            ps.setString(10, rec.getCustomerCode());
-        }
-
-        if (rec.getCogsAmount() == null) {
-            ps.setNull(11, Types.REAL);
-        } else {
-            ps.setDouble(11, rec.getCogsAmount());
-        }
+        if (rec.getCustomerCode() == null) ps.setNull(10, Types.VARCHAR); else ps.setString(10, rec.getCustomerCode());
+        if (rec.getCogsAmount() == null) ps.setNull(11, Types.REAL); else ps.setDouble(11, rec.getCogsAmount());
     }
 
     private void setNullableBigDecimal(PreparedStatement ps, int idx, BigDecimal val) throws SQLException {
-        if (val == null) {
-            ps.setNull(idx, Types.REAL);
-        } else {
-            // SQLite uses dynamic typing; REAL will store as double.
-            // If exact precision is critical, consider storing DECIMAL as TEXT.
-            ps.setDouble(idx, val.doubleValue());
+        if (val == null) ps.setNull(idx, Types.REAL); else ps.setDouble(idx, val.doubleValue());
+    }
+
+    @Override
+    public void deleteAll() throws Exception {
+        try (Connection c = cp.get(); Statement st = c.createStatement()) {
+            st.executeUpdate("DELETE FROM sales");
         }
     }
 }
