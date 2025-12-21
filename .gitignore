@@ -1,7 +1,2 @@
-# App data/logs (not for version control)
-Fost/Fost/user.actions.log
-Fost/fost.db
-
-# Optional broader ignores (uncomment if desired)
-# *.db
-# *.log
+*.db
+*.log

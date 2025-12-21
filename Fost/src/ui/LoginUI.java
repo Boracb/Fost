@@ -8,38 +8,13 @@ import java.util.ResourceBundle;
 import db.UserDatabaseHelper;
 
 /**
- * UI prozor za prijavu korisnika. Sadrži polja za unos korisničkog imena,
- * lozinke i uloge (Korisnik ili Administrator). Validira unos i provjerava
- * vjerodajnice pomoću UserDatabaseHelper klase. Prikazuje poruke o greškama ili
- * uspjehu prijave. Na uspješnu prijavu otvara glavni UI prozor.
+ * UI prozor za prijavu korisnika.
  */
-
 public class LoginUI extends JFrame {
 
-	// ResourceBundle za internacionalizaciju
-
     private static final ResourceBundle messages = ResourceBundle.getBundle("messages");
+    private static final String DB_URL = "jdbc:sqlite:fost.db"; // dodano za Inventory panel
 
-    // Konstruktor
-    // Inicijalizira i prikazuje UI
-    // Postavlja akcije za gumb prijave
-    // Na uspješnu prijavu otvara glavni UI
-    // Na neuspješnu prijavu prikazuje poruku o grešci
-    //	 Dodaje gumb "Podaci" koji otvara KomitentiUI
-    // Postavlja gradient pozadinu
-    // Postavlja fokus na polje za lozinku prilikom pokretanja
-    //	 Postavlja zadani gumb na gumb prijave
-    //     Pamti posljednjeg korisnika i postavlja ga kao zadani u padajućem izborniku
-    //     Automatski postavlja ulogu na "Administrator" ako je korisničko ime "admin" ili "administrator"
-    //     Dodaje marginu oko glavnog panela
-    //     Stilizira gumb prijave s bojama i fontom
-    //	 Dodaje ikonu aplikacije (ako je dostupna)
-    //     Postavlja veličinu prozora na 420x350 piksela
-    //     Centra prozor na ekran
-    //	 Postavlja naslov prozora iz ResourceBundle
-    //     Dodaje razmak između komponenti u GridBagLayoutu
-    //     Koristi sans-serif font za naslove i gumbe
-    //	 Postavlja veličine komponenti za konzistentan izgled
     public LoginUI() {
         setTitle(messages.getString("login.title"));
         setSize(420, 350);
@@ -51,8 +26,10 @@ public class LoginUI extends JFrame {
             protected void paintComponent(Graphics g) {
                 super.paintComponent(g);
                 Graphics2D g2d = (Graphics2D) g;
-                g2d.setPaint(new GradientPaint(0,0,new Color(230,240,255),
-                        0,getHeight(), new Color(180,200,240)));
+                g2d.setPaint(new GradientPaint(
+                        0, 0, new Color(230,240,255),
+                        0, getHeight(), new Color(180,200,240)
+                ));
                 g2d.fillRect(0,0,getWidth(),getHeight());
             }
         };
@@ -87,27 +64,28 @@ public class LoginUI extends JFrame {
         txtPassword.setPreferredSize(new Dimension(180, 25));
         gbc.gridx = 1;
         backgroundPanel.add(txtPassword, gbc);
-
         SwingUtilities.invokeLater(() -> txtPassword.requestFocusInWindow());
 
         // --- Uloga ---
         gbc.gridy++; gbc.gridx = 0;
         backgroundPanel.add(new JLabel(messages.getString("login.role")), gbc);
-
-        JComboBox<String> cmbRole = new JComboBox<>(new String[]{messages.getString("role.user"), messages.getString("role.admin")});
+        JComboBox<String> cmbRole = new JComboBox<>(
+                new String[]{messages.getString("role.user"), messages.getString("role.admin")}
+        );
         cmbRole.setPreferredSize(new Dimension(180, 25));
         gbc.gridx = 1;
         backgroundPanel.add(cmbRole, gbc);
-// Automatski postavlja ulogu na "Administrator" ako je korisničko ime "admin" ili "administrator"
+
+        // Auto postavi admin rolu
         cmbUsername.addActionListener(e -> {
             String u = (String) cmbUsername.getSelectedItem();
             boolean isAdmin = u != null && (u.equalsIgnoreCase("admin") || u.equalsIgnoreCase("administrator"));
             cmbRole.setSelectedItem(isAdmin ? messages.getString("role.admin") : messages.getString("role.user"));
         });
+        // trigger initial
         cmbUsername.dispatchEvent(new ActionEvent(cmbUsername, ActionEvent.ACTION_PERFORMED, ""));
 
-        // --- Gumb prijava ---
-        
+        // --- Gumb Prijava ---
         gbc.gridy++; gbc.gridx = 0; gbc.gridwidth = 2;
         JButton btnLogin = new JButton(messages.getString("login.button"));
         btnLogin.setPreferredSize(new Dimension(120, 30));
@@ -122,38 +100,60 @@ public class LoginUI extends JFrame {
             String role = (String) cmbRole.getSelectedItem();
 
             if (username == null || username.trim().isEmpty() || password.isEmpty() || role == null) {
-                JOptionPane.showMessageDialog(this, messages.getString("login.error.empty"), messages.getString("error.title"), JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this,
+                        messages.getString("login.error.empty"),
+                        messages.getString("error.title"),
+                        JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             ActionLogger.log(username, "Pritisnuo PRIJAVA");
-// Provjera vjerodajnica
+
             boolean ok = UserDatabaseHelper.authenticateHashed(username, password, role);
             if (ok) {
-            	// Evidencija uspješne prijave
-            	// Spremanje posljednjeg korisnika
-            	// Otvaranje glavnog UI-ja
-            	// Zatvaranje prozora prijave
                 ActionLogger.log(username, "Uspješna prijava kao " + role);
                 UserDatabaseHelper.saveLastUser(username);
-
-                // Otvaranje glavnog UI-ja
                 dispose();
                 new UI(username, role).createAndShowGUI();
             } else {
                 ActionLogger.log(username, "Neuspješna prijava");
-                JOptionPane.showMessageDialog(this, messages.getString("login.error.invalid"), messages.getString("error.title"), JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this,
+                        messages.getString("login.error.invalid"),
+                        messages.getString("error.title"),
+                        JOptionPane.ERROR_MESSAGE);
             }
         });
         backgroundPanel.add(btnLogin, gbc);
 
-        // --- Novi gumb "Podaci" ---
+        // --- Gumb "Podaci" ---
         gbc.gridy++;
         JButton btnPodaci = new JButton("Podaci");
         btnPodaci.addActionListener(ev -> new KomitentiUI());
         backgroundPanel.add(btnPodaci, gbc);
 
+        // --- NOVI GUMB: "Inventory" (otvara ProductionInventoryPanel) ---
+        gbc.gridy++;
+        JButton btnInventory = new JButton("Inventory");
+        btnInventory.addActionListener(ev -> {
+			try {
+				openInventoryWindow();
+			} catch (Exception e1) {
+				// TODO Auto-generated catch block
+				e1.printStackTrace();
+			}
+		});
+        backgroundPanel.add(btnInventory, gbc);
+
         getRootPane().setDefaultButton(btnLogin);
         setVisible(true);
+    }
+
+    private void openInventoryWindow() throws Exception {
+        JFrame f = new JFrame("Production Inventory");
+        f.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        f.setContentPane(new ProductionInventoryPanel(DB_URL));
+        f.setSize(1400, 780);
+        f.setLocationRelativeTo(this);
+        f.setVisible(true);
     }
 }

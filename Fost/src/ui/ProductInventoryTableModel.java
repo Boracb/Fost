@@ -13,7 +13,9 @@ public class ProductInventoryTableModel extends AbstractTableModel {
     private final String[] cols = {
             "Šifra","Naziv","Dobavljač","Vrsta","Količina (base)",
             "Base jedinica","Alt jedinica","Alt količina",
-            "m2/kom","Pakiranje","Min.nar.","Jed. cijena","Ukupna vrijednost","Grupe"
+            "m2/kom","Pakiranje","Min.nar.","Jed. cijena",
+            "Prodaja (period)",      // NOVO
+            "Ukupna vrijednost","Grupe"
     };
 
     private final List<ProductInventoryView> original = new ArrayList<>();
@@ -29,13 +31,11 @@ public class ProductInventoryTableModel extends AbstractTableModel {
 
     public void applyFilter(Predicate<ProductInventoryView> pred) {
         data.clear();
-        for (var piv : original) {
-            if (pred.test(piv)) data.add(piv);
-        }
+        for (var piv : original) if (pred.test(piv)) data.add(piv);
         fireTableDataChanged();
     }
 
-    public void sortBy(Comparator<? super ProductInventoryView> comp) {  // <— promjena
+    public void sortBy(Comparator<? super ProductInventoryView> comp) {
         data.sort(comp);
         fireTableDataChanged();
     }
@@ -51,7 +51,7 @@ public class ProductInventoryTableModel extends AbstractTableModel {
     @Override
     public Class<?> getColumnClass(int columnIndex) {
         return switch (columnIndex) {
-            case 4,7,8,9,10,11,12 -> Double.class;
+            case 4,7,8,9,10,11,12,13 -> Double.class; // +12 (prodaja) +13 (vrijednost)
             default -> String.class;
         };
     }
@@ -74,8 +74,9 @@ public class ProductInventoryTableModel extends AbstractTableModel {
             case 9 -> p.getPackSize();
             case 10 -> p.getMinOrderQty();
             case 11 -> p.getPurchaseUnitPrice();
-            case 12 -> v.getTotalValue();
-            case 13 -> String.join(",", v.getGroupCodes());
+            case 12 -> v.getSalesQtyPeriod();              // NOVO
+            case 13 -> v.getTotalValue();
+            case 14 -> String.join(",", v.getGroupCodes());
             default -> null;
         };
     }

@@ -21,6 +21,7 @@ public class MainTest {
             System.out.println("Otvaram KomitentiUI na EDT...");
             KomitentiUI ui = new KomitentiUI();
             // KomitentiUI sada poziva setVisible(true) u konstruktoru
+            System.out.println("ok, KomitentiUI otvoren.");
           
         });
         
